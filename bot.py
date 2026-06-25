@@ -85,7 +85,7 @@ def extract_album_id(url):
 
 
 def get_album_data(album_id):
-    """Получение данных об альбоме с ISRC для каждого трека"""
+    """Получение данных об альбоме с ISRC для всех треков (пакетно)"""
     token = get_spotify_token()
     if not token:
         return None, None
@@ -93,22 +93,26 @@ def get_album_data(album_id):
     headers = {"Authorization": f"Bearer {token}"}
     
     try:
+        # Данные альбома
         album_resp = requests.get(
             f"https://api.spotify.com/v1/albums/{album_id}",
             headers=headers,
-            timeout=15
+            timeout=30
         )
         album_resp.raise_for_status()
         album_data = album_resp.json()
         
+        # Получаем все треки альбома
         tracks = []
         offset = 0
         limit = 50
+        all_track_ids = []
+        
         while True:
             tracks_resp = requests.get(
                 f"https://api.spotify.com/v1/albums/{album_id}/tracks?limit={limit}&offset={offset}",
                 headers=headers,
-                timeout=15
+                timeout=30
             )
             tracks_resp.raise_for_status()
             tracks_data = tracks_resp.json()
@@ -116,24 +120,44 @@ def get_album_data(album_id):
             for track in tracks_data.get("items", []):
                 track_id = track.get("id")
                 if track_id:
-                    try:
-                        track_detail_resp = requests.get(
-                            f"https://api.spotify.com/v1/tracks/{track_id}",
-                            headers=headers,
-                            timeout=15
-                        )
-                        track_detail_resp.raise_for_status()
-                        track_detail = track_detail_resp.json()
-                        track['external_ids'] = track_detail.get('external_ids', {})
-                        track['duration_ms'] = track_detail.get('duration_ms', track.get('duration_ms'))
-                    except Exception as e:
-                        logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
-                
+                    all_track_ids.append(track_id)
                 tracks.append(track)
             
             if len(tracks_data.get("items", [])) < limit:
                 break
             offset += limit
+        
+        # Получаем ISRC для всех треков одним запросом (максимум 50 за раз)
+        if all_track_ids:
+            # Разбиваем на пачки по 50
+            for i in range(0, len(all_track_ids), 50):
+                batch = all_track_ids[i:i+50]
+                ids_str = ",".join(batch)
+                
+                try:
+                    track_detail_resp = requests.get(
+                        f"https://api.spotify.com/v1/tracks?ids={ids_str}",
+                        headers=headers,
+                        timeout=30
+                    )
+                    track_detail_resp.raise_for_status()
+                    track_details = track_detail_resp.json().get("tracks", [])
+                    
+                    # Сопоставляем ISRC с треками
+                    for track_detail in track_details:
+                        track_id = track_detail.get("id")
+                        isrc = track_detail.get("external_ids", {}).get("isrc")
+                        duration_ms = track_detail.get("duration_ms")
+                        
+                        # Находим трек в списке и добавляем ISRC
+                        for track in tracks:
+                            if track.get("id") == track_id:
+                                track['external_ids'] = {'isrc': isrc} if isrc else {}
+                                track['duration_ms'] = duration_ms or track.get('duration_ms')
+                                break
+                                
+                except Exception as e:
+                    logger.warning(f"Не удалось получить ISRC для пачки треков: {e}")
         
         return album_data, tracks
         
