@@ -4,6 +4,7 @@ import logging
 import tempfile
 import requests
 import base64
+import time
 from io import BytesIO
 from PIL import Image
 from urllib.parse import quote_plus
@@ -22,18 +23,15 @@ SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN")
 
-# Проверка токенов
 if not BOT_TOKEN:
     print("❌ ОШИБКА: BOT_TOKEN не найден в .env!")
     exit(1)
 
 if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
     print("⚠️ ВНИМАНИЕ: Spotify API ключи не найдены в .env!")
-    print("   Информация о релизах работать не будет.")
 
 if not APIFY_API_TOKEN:
     print("⚠️ ВНИМАНИЕ: APIFY_API_TOKEN не найден в .env!")
-    print("   Жанры будут браться из Spotify API (если доступны).")
 # =====================================================
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
@@ -85,7 +83,7 @@ def extract_album_id(url):
 
 
 def get_album_data(album_id):
-    """Получение данных об альбоме с ISRC для всех треков (пакетно)"""
+    """Получение данных об альбоме с ISRC для каждого трека (по одному запросу)"""
     token = get_spotify_token()
     if not token:
         return None, None
@@ -106,7 +104,6 @@ def get_album_data(album_id):
         tracks = []
         offset = 0
         limit = 50
-        all_track_ids = []
         
         while True:
             tracks_resp = requests.get(
@@ -120,44 +117,33 @@ def get_album_data(album_id):
             for track in tracks_data.get("items", []):
                 track_id = track.get("id")
                 if track_id:
-                    all_track_ids.append(track_id)
+                    try:
+                        # Запрос для каждого трека с задержкой 0.2 сек
+                        time.sleep(0.2)
+                        track_detail_resp = requests.get(
+                            f"https://api.spotify.com/v1/tracks/{track_id}",
+                            headers=headers,
+                            timeout=30
+                        )
+                        track_detail_resp.raise_for_status()
+                        track_detail = track_detail_resp.json()
+                        
+                        isrc = track_detail.get('external_ids', {}).get('isrc')
+                        if isrc:
+                            track['external_ids'] = {'isrc': isrc}
+                        else:
+                            track['external_ids'] = {}
+                        
+                        track['duration_ms'] = track_detail.get('duration_ms', track.get('duration_ms'))
+                    except Exception as e:
+                        logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
+                        track['external_ids'] = {}
+                
                 tracks.append(track)
             
             if len(tracks_data.get("items", [])) < limit:
                 break
             offset += limit
-        
-        # Получаем ISRC для всех треков одним запросом (максимум 50 за раз)
-        if all_track_ids:
-            # Разбиваем на пачки по 50
-            for i in range(0, len(all_track_ids), 50):
-                batch = all_track_ids[i:i+50]
-                ids_str = ",".join(batch)
-                
-                try:
-                    track_detail_resp = requests.get(
-                        f"https://api.spotify.com/v1/tracks?ids={ids_str}",
-                        headers=headers,
-                        timeout=30
-                    )
-                    track_detail_resp.raise_for_status()
-                    track_details = track_detail_resp.json().get("tracks", [])
-                    
-                    # Сопоставляем ISRC с треками
-                    for track_detail in track_details:
-                        track_id = track_detail.get("id")
-                        isrc = track_detail.get("external_ids", {}).get("isrc")
-                        duration_ms = track_detail.get("duration_ms")
-                        
-                        # Находим трек в списке и добавляем ISRC
-                        for track in tracks:
-                            if track.get("id") == track_id:
-                                track['external_ids'] = {'isrc': isrc} if isrc else {}
-                                track['duration_ms'] = duration_ms or track.get('duration_ms')
-                                break
-                                
-                except Exception as e:
-                    logger.warning(f"Не удалось получить ISRC для пачки треков: {e}")
         
         return album_data, tracks
         
@@ -189,7 +175,7 @@ def get_track_data(track_id):
 
 
 def get_cover_image(url, size=COVER_SIZE):
-    """Скачивание и ресайз обложки"""
+    """Скачивание и ресайз обложки в 3000x3000 JPG"""
     try:
         response = requests.get(url, timeout=15)
         response.raise_for_status()
@@ -297,10 +283,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 3️⃣ *Команды:*
    /start — приветствие
    /help — эта справка
-
-*Поддерживаемые ссылки:*
-• Альбом: spotify.com/album/...
-• Трек: spotify.com/track/...
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -343,12 +325,10 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await status_msg.edit_text("❌ Не удалось получить данные альбома")
                 return
         
-        # Получаем жанры через Apify
         genres = get_album_genre_via_apify(url)
         if not genres:
             genres = "Не указан"
         
-        # Формируем ответ
         name = album_data.get('name', 'Неизвестно')
         artist = album_data['artists'][0]['name'] if album_data.get('artists') else 'Неизвестно'
         release_date = album_data.get('release_date', 'Неизвестно')
@@ -368,11 +348,10 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             duration = ms_to_min_sec(track.get('duration_ms'))
             isrc = track.get('external_ids', {}).get('isrc', 'Не найден')
             
-            # ISRC в обратных кавычках (как UPC) — автоматически копируется при нажатии
             if isrc != 'Не найден':
-                response += f"{i}. {track_name} ({duration}) ISRC: `{isrc}`\n"
+                response += f"{i}. `{track_name}` ({duration}) ISRC: `{isrc}`\n"
             else:
-                response += f"{i}. {track_name} ({duration}) ISRC: Не найден\n"
+                response += f"{i}. `{track_name}` ({duration}) ISRC: Не найден\n"
         
         cover_url = None
         if album_data.get('images'):
@@ -383,7 +362,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         if cover_url:
             cover_buffer = get_cover_image(cover_url)
             if cover_buffer:
-                # ОТПРАВЛЯЕМ КАК ДОКУМЕНТ (сохраняет оригинальное качество)
                 await update.message.reply_document(
                     document=InputFile(cover_buffer, filename="cover.jpg"),
                     caption=response,
