@@ -1,0 +1,34 @@
+# Секреты
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Временные файлы
+temp/
+*.wav
+*.mp3
+*.log
+*.tmp
+
+# Apify
+.apify/
+
+# Docker
+*.pid"*.exe" 
+"ffmpeg.exe" 
+"ffplay.exe" 
+"ffprobe.exe" 
