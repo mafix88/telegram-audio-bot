@@ -343,6 +343,61 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         response += f"🎸 *Жанр:* {genres}\n\n"
         response += "*🎶 Треки:*\n"
         
+        # Обрезаем список треков, если слишком длинный
+        max_tracks = 15  # Показываем максимум 15 треков в подписи
+        for i, track in enumerate(tracks, 1):
+            if i > max_tracks:
+                remaining = len(tracks) - max_tracks
+                response += f"\n... и ещё {remaining} треков"
+                break
+            track_name = track.get('name', 'Без названия')
+            duration = ms_to_min_sec(track.get('duration_ms'))
+            isrc = track.get('external_ids', {}).get('isrc', 'Не найден')
+            
+            if isrc != 'Не найден':
+                response += f"{i}. `{track_name}` ({duration}) ISRC: `{isrc}`\n"
+            else:
+                response += f"{i}. `{track_name}` ({duration}) ISRC: Не найден\n"
+        
+        cover_url = None
+        if album_data.get('images'):
+            cover_url = album_data['images'][0]['url']
+        
+        await status_msg.delete()
+        
+        # Отправляем обложку отдельно
+        if cover_url:
+            cover_buffer = get_cover_image(cover_url)
+            if cover_buffer:
+                await update.message.reply_document(
+                    document=InputFile(cover_buffer, filename="cover.jpg")
+                )
+        
+        # Отправляем текст отдельно
+        await update.message.reply_text(response, parse_mode="Markdown")
+            
+    except Exception as e:
+        logger.error(f"Ошибка обработки Spotify: {e}")
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
+        
+        genres = get_album_genre_via_apify(url)
+        if not genres:
+            genres = "Не указан"
+        
+        name = album_data.get('name', 'Неизвестно')
+        artist = album_data['artists'][0]['name'] if album_data.get('artists') else 'Неизвестно'
+        release_date = album_data.get('release_date', 'Неизвестно')
+        total_tracks = album_data.get('total_tracks', len(tracks))
+        upc = album_data.get('external_ids', {}).get('upc', 'Неизвестно')
+        
+        response = f"📀 *{name}*\n"
+        response += f"👤 *Исполнитель:* {artist}\n"
+        response += f"📅 *Дата выхода:* {release_date}\n"
+        response += f"🎵 *Треков:* {total_tracks}\n"
+        response += f"🏷️ *UPC:* `{upc}`\n"
+        response += f"🎸 *Жанр:* {genres}\n\n"
+        response += "*🎶 Треки:*\n"
+        
         for i, track in enumerate(tracks, 1):
             track_name = track.get('name', 'Без названия')
             duration = ms_to_min_sec(track.get('duration_ms'))
