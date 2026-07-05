@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 # ==================== SPOTIFY API ====================
 
 def get_spotify_token():
+    """Получение токена для Spotify API"""
     if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
         return None
     
@@ -65,6 +66,7 @@ def get_spotify_token():
 
 
 def extract_album_id(url):
+    """Извлечение ID альбома из ссылки Spotify"""
     patterns = [
         r'spotify\.com/album/([a-zA-Z0-9]+)',
         r'open\.spotify\.com/album/([a-zA-Z0-9]+)',
@@ -80,10 +82,8 @@ def extract_album_id(url):
     return None, None
 
 
-def get_album_metadata(album_id):
-    """Получение данных альбома через Spotify API"""
-    time.sleep(10.0)  # Ждём 10 секунд
-    
+def get_album_data(album_id):
+    """Получение данных об альбоме с ISRC для каждого трека"""
     token = get_spotify_token()
     if not token:
         return None, None
@@ -91,6 +91,7 @@ def get_album_metadata(album_id):
     headers = {"Authorization": f"Bearer {token}"}
     
     try:
+        # Данные альбома
         album_resp = requests.get(
             f"https://api.spotify.com/v1/albums/{album_id}",
             headers=headers,
@@ -99,6 +100,7 @@ def get_album_metadata(album_id):
         album_resp.raise_for_status()
         album_data = album_resp.json()
         
+        # Получаем все треки альбома
         tracks = []
         offset = 0
         limit = 50
@@ -113,36 +115,31 @@ def get_album_metadata(album_id):
             tracks_data = tracks_resp.json()
             
             for track in tracks_data.get("items", []):
-                # Получаем ISRC для каждого трека
                 track_id = track.get("id")
-                isrc = "Не найден"
-                duration_ms = track.get('duration_ms', 0)
-                
                 if track_id:
                     try:
-                        time.sleep(5.0)  # 5 секунд между запросами треков
+                        # Задержка между запросами
+                        time.sleep(0.5)
                         track_detail_resp = requests.get(
                             f"https://api.spotify.com/v1/tracks/{track_id}",
                             headers=headers,
                             timeout=30
                         )
-                        if track_detail_resp.status_code == 429:
-                            logger.warning("Rate limit 429, ждём 30 секунд...")
-                            time.sleep(30)
-                            continue
                         track_detail_resp.raise_for_status()
                         track_detail = track_detail_resp.json()
-                        isrc = track_detail.get('external_ids', {}).get('isrc', 'Не найден')
-                        duration_ms = track_detail.get('duration_ms', duration_ms)
+                        
+                        isrc = track_detail.get('external_ids', {}).get('isrc')
+                        if isrc:
+                            track['external_ids'] = {'isrc': isrc}
+                        else:
+                            track['external_ids'] = {}
+                        
+                        track['duration_ms'] = track_detail.get('duration_ms', track.get('duration_ms'))
                     except Exception as e:
-                        logger.warning(f"Не удалось получить ISRC для {track_id}: {e}")
+                        logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
+                        track['external_ids'] = {}
                 
-                tracks.append({
-                    'name': track.get('name', 'Без названия'),
-                    'duration_ms': duration_ms,
-                    'id': track.get('id'),
-                    'isrc': isrc
-                })
+                tracks.append(track)
             
             if len(tracks_data.get("items", [])) < limit:
                 break
@@ -151,11 +148,12 @@ def get_album_metadata(album_id):
         return album_data, tracks
         
     except Exception as e:
-        logger.error(f"Ошибка получения данных альбома: {e}")
+        logger.error(f"Ошибка получения данных Spotify: {e}")
         return None, None
 
 
 def get_track_data(track_id):
+    """Получение данных о треке"""
     token = get_spotify_token()
     if not token:
         return None
@@ -177,6 +175,7 @@ def get_track_data(track_id):
 
 
 def get_cover_image(url, size=COVER_SIZE):
+    """Скачивание и ресайз обложки в 3000x3000 JPG"""
     try:
         response = requests.get(url, timeout=15)
         response.raise_for_status()
@@ -200,6 +199,7 @@ def get_cover_image(url, size=COVER_SIZE):
 
 
 def ms_to_min_sec(ms):
+    """Конвертация миллисекунд в MM:SS"""
     if not ms:
         return "0:00"
     total_sec = int(ms / 1000)
@@ -208,12 +208,12 @@ def ms_to_min_sec(ms):
     return f"{minutes}:{seconds:02d}"
 
 
-# ==================== APIFY (ЖАНРЫ + ISRC) ====================
+# ==================== APIFY (ЖАНРЫ) ====================
 
-def get_album_data_from_apify(album_url):
-    """Получение данных альбома через Apify (жанры + ISRC)"""
+def get_album_genre_via_apify(album_url):
+    """Получение жанров альбома через Apify"""
     if not APIFY_API_TOKEN:
-        return None, None, None
+        return None
     
     try:
         client = ApifyClient(APIFY_API_TOKEN)
@@ -228,37 +228,23 @@ def get_album_data_from_apify(album_url):
         
         if dataset_items:
             album_data = dataset_items[0]
-            
-            # Жанры
             genres = []
+            
             if album_data.get('artists'):
                 for artist in album_data['artists']:
                     if artist.get('artist_genres'):
                         genres.extend(artist['artist_genres'])
+            
             if not genres and album_data.get('genres'):
                 genres = album_data['genres']
-            genres_str = ", ".join(set(genres)) if genres else "Не указан"
             
-            # Треки с ISRC
-            tracks = []
-            if album_data.get('tracks'):
-                for track in album_data['tracks']:
-                    tracks.append({
-                        'name': track.get('name', 'Без названия'),
-                        'duration_ms': track.get('duration_ms', 0),
-                        'isrc': track.get('isrc', 'Не найден')
-                    })
-            
-            # UPC
-            upc = album_data.get('upc', 'Неизвестно')
-            
-            return genres_str, tracks, upc
+            return ", ".join(set(genres)) if genres else None
         
-        return None, None, None
+        return None
         
     except Exception as e:
         logger.error(f"Ошибка Apify: {e}")
-        return None, None, None
+        return None
 
 
 # ==================== КОМАНДЫ БОТА ====================
@@ -276,6 +262,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎵 *Конвертация MP3 → WAV:*
    Отправьте MP3 файл
    → Получите WAV с тем же именем
+
+*Примеры ссылок:*
+• https://open.spotify.com/album/1W25XYjRQPob14CkgOYVms
+• https://open.spotify.com/track/4iV5W9uYEdYUVa79Axb7Rh
     """
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
@@ -289,11 +279,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 2️⃣ *Конвертировать MP3 в WAV:*
    Отправьте MP3 файл
+
+3️⃣ *Команды:*
+   /start — приветствие
+   /help — эта справка
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
 async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ссылок на Spotify"""
     url = update.message.text.strip()
     
     if not any(x in url for x in ['spotify.com', 'open.spotify']):
@@ -307,41 +302,40 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     status_msg = await update.message.reply_text("🔍 Получаю информацию...")
     
     try:
-        # Пробуем получить данные через Apify (жанры + ISRC)
-        genres, apify_tracks, upc = get_album_data_from_apify(url)
-        
-        # Получаем метаданные через Spotify API
-        album_data, spotify_tracks = get_album_metadata(album_id)
-        
-        # Объединяем данные
-        if album_data:
-            name = album_data.get('name', 'Неизвестно')
-            artist = album_data['artists'][0]['name'] if album_data.get('artists') else 'Неизвестно'
-            release_date = album_data.get('release_date', 'Неизвестно')
-            total_tracks = album_data.get('total_tracks', len(spotify_tracks))
-            cover_url = album_data['images'][0]['url'] if album_data.get('images') else None
+        if type_ == "track":
+            track_data = get_track_data(album_id)
+            if not track_data:
+                await status_msg.edit_text("❌ Не удалось получить данные трека")
+                return
+            
+            album_data = {
+                'name': track_data.get('name', 'Неизвестно'),
+                'artists': track_data.get('artists', [{'name': 'Неизвестно'}]),
+                'release_date': track_data.get('album', {}).get('release_date', 'Неизвестно'),
+                'total_tracks': 1,
+                'images': track_data.get('album', {}).get('images', []),
+                'external_ids': {'upc': 'Неизвестно'},
+            }
+            
+            tracks = [track_data]
+            
         else:
-            name = 'Неизвестно'
-            artist = 'Неизвестно'
-            release_date = 'Неизвестно'
-            total_tracks = len(apify_tracks) if apify_tracks else 0
-            cover_url = None
+            album_data, tracks = get_album_data(album_id)
+            if not album_data:
+                await status_msg.edit_text("❌ Не удалось получить данные альбома")
+                return
         
-        # Берем треки: сначала из Apify (с ISRC), потом из Spotify (если нет ISRC)
-        tracks = []
-        if apify_tracks:
-            tracks = apify_tracks
-        elif spotify_tracks:
-            tracks = spotify_tracks
-        else:
-            tracks = [{'name': 'Трек не найден', 'duration_ms': 0, 'isrc': 'Не найден'}]
-        
-        if not upc:
-            upc = 'Неизвестно'
+        genres = get_album_genre_via_apify(url)
         if not genres:
-            genres = 'Не указан'
+            genres = "Не указан"
         
-        # Шапка
+        name = album_data.get('name', 'Неизвестно')
+        artist = album_data['artists'][0]['name'] if album_data.get('artists') else 'Неизвестно'
+        release_date = album_data.get('release_date', 'Неизвестно')
+        total_tracks = album_data.get('total_tracks', len(tracks))
+        upc = album_data.get('external_ids', {}).get('upc', 'Неизвестно')
+        
+        # ========== ШАПКА ==========
         header = f"📀 *{name}*\n"
         header += f"👤 *Исполнитель:* {artist}\n"
         header += f"📅 *Дата выхода:* {release_date}\n"
@@ -350,15 +344,24 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         header += f"🎸 *Жанр:* {genres}\n\n"
         header += "*🎶 Треки:*\n"
         
-        # Список треков
+        # ========== ФОРМИРУЕМ СПИСОК ТРЕКОВ (ВСЕ!) ==========
         all_tracks_text = ""
         for i, track in enumerate(tracks, 1):
             track_name = track.get('name', 'Без названия')
             duration = ms_to_min_sec(track.get('duration_ms'))
-            isrc = track.get('isrc', 'Не найден')
-            all_tracks_text += f"{i}. `{track_name}` ({duration}) ISRC: `{isrc}`\n"
+            isrc = track.get('external_ids', {}).get('isrc', 'Не найден')
+            
+            if isrc != 'Не найден':
+                all_tracks_text += f"{i}. `{track_name}` ({duration}) ISRC: `{isrc}`\n"
+            else:
+                all_tracks_text += f"{i}. `{track_name}` ({duration}) ISRC: Не найден\n"
         
+        # ========== ОТПРАВКА ==========
         full_text = header + all_tracks_text
+        
+        cover_url = None
+        if album_data.get('images'):
+            cover_url = album_data['images'][0]['url']
         
         await status_msg.delete()
         
@@ -376,17 +379,20 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             tracks_lines = all_tracks_text.split('\n')
             mid = len(tracks_lines) // 2
+            
             first_part = header + "\n".join(tracks_lines[:mid])
             second_part = "🎵 *Продолжение списка треков:*\n\n" + "\n".join(tracks_lines[mid:])
+            
             await update.message.reply_text(first_part, parse_mode="Markdown")
             await update.message.reply_text(second_part, parse_mode="Markdown")
             
     except Exception as e:
-        logger.error(f"Ошибка обработки: {e}")
+        logger.error(f"Ошибка обработки Spotify: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Конвертация MP3 в WAV"""
     try:
         audio_file = await update.message.audio.get_file()
         
