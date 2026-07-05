@@ -119,7 +119,7 @@ def get_album_data(album_id):
                 if track_id:
                     try:
                         # Запрос для каждого трека с задержкой 0.2 сек
-                        time.sleep(0.2)
+                        time.sleep(1.0)
                         track_detail_resp = requests.get(
                             f"https://api.spotify.com/v1/tracks/{track_id}",
                             headers=headers,
