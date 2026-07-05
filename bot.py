@@ -515,6 +515,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Ошибка обработки: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
 
+
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Конвертация MP3 в WAV"""
     try:
@@ -570,14 +571,12 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # === ПРАВИЛЬНОЕ УДАЛЕНИЕ ВЕБХУКА ===
-    import asyncio
+    # Просто удаляем вебхук (без asyncio)
     try:
-        asyncio.run(app.bot.delete_webhook(drop_pending_updates=True))
+        app.bot.delete_webhook(drop_pending_updates=True)
         print("✅ Webhook удалён")
     except Exception as e:
         print(f"⚠️ Не удалось удалить webhook: {e}")
-    # ====================================
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
@@ -587,6 +586,9 @@ def main():
     app.add_error_handler(error_handler)
     
     print("🎵 Бот запущен!")
+    print(f"   BOT_TOKEN: {'✅' if BOT_TOKEN else '❌'}")
+    print(f"   SPOTIFY_API: {'✅' if SPOTIFY_CLIENT_ID else '❌'}")
+    print(f"   APIFY_API: {'✅' if APIFY_API_TOKEN else '❌'}")
     app.run_polling()
 
 
