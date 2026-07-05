@@ -83,7 +83,7 @@ def extract_album_id(url):
 
 
 def get_album_data(album_id):
-    """Получение данных об альбоме с ISRC для каждого трека (по одному запросу)"""
+    """Получение данных об альбоме с ISRC для каждого трека (с повторными попытками)"""
     token = get_spotify_token()
     if not token:
         return None, None
@@ -91,7 +91,6 @@ def get_album_data(album_id):
     headers = {"Authorization": f"Bearer {token}"}
     
     try:
-        # Данные альбома
         album_resp = requests.get(
             f"https://api.spotify.com/v1/albums/{album_id}",
             headers=headers,
@@ -100,7 +99,6 @@ def get_album_data(album_id):
         album_resp.raise_for_status()
         album_data = album_resp.json()
         
-        # Получаем все треки альбома
         tracks = []
         offset = 0
         limit = 50
@@ -117,27 +115,44 @@ def get_album_data(album_id):
             for track in tracks_data.get("items", []):
                 track_id = track.get("id")
                 if track_id:
-                    try:
-                        # Запрос для каждого трека с задержкой 0.2 сек
-                        time.sleep(1.0)
-                        track_detail_resp = requests.get(
-                            f"https://api.spotify.com/v1/tracks/{track_id}",
-                            headers=headers,
-                            timeout=30
-                        )
-                        track_detail_resp.raise_for_status()
-                        track_detail = track_detail_resp.json()
-                        
-                        isrc = track_detail.get('external_ids', {}).get('isrc')
-                        if isrc:
-                            track['external_ids'] = {'isrc': isrc}
-                        else:
-                            track['external_ids'] = {}
-                        
-                        track['duration_ms'] = track_detail.get('duration_ms', track.get('duration_ms'))
-                    except Exception as e:
-                        logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
-                        track['external_ids'] = {}
+                    # Пробуем получить ISRC с повторными попытками
+                    for attempt in range(5):  # максимум 5 попыток
+                        try:
+                            # Задержка 1 секунда между запросами
+                            time.sleep(1.0)
+                            
+                            track_detail_resp = requests.get(
+                                f"https://api.spotify.com/v1/tracks/{track_id}",
+                                headers=headers,
+                                timeout=30
+                            )
+                            
+                            # Если 429 — пробуем снова
+                            if track_detail_resp.status_code == 429:
+                                wait_time = (attempt + 1) * 2  # 2, 4, 6, 8, 10 секунд
+                                logger.warning(f"Rate limit (429), ждём {wait_time} секунд...")
+                                time.sleep(wait_time)
+                                continue
+                            
+                            track_detail_resp.raise_for_status()
+                            track_detail = track_detail_resp.json()
+                            
+                            isrc = track_detail.get('external_ids', {}).get('isrc')
+                            if isrc:
+                                track['external_ids'] = {'isrc': isrc}
+                            else:
+                                track['external_ids'] = {}
+                            
+                            track['duration_ms'] = track_detail.get('duration_ms', track.get('duration_ms'))
+                            break  # Успешно — выходим из цикла попыток
+                            
+                        except Exception as e:
+                            if attempt == 4:  # Последняя попытка
+                                logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
+                                track['external_ids'] = {}
+                            else:
+                                logger.warning(f"Ошибка при запросе трека {track_id}, повторная попытка {attempt+1}/5")
+                                time.sleep(1.0)
                 
                 tracks.append(track)
             
