@@ -85,6 +85,9 @@ def extract_album_id(url):
 
 def get_album_metadata(album_id):
     """Получение базовых данных об альбоме через Spotify API (без ISRC)"""
+    # Ждём 10 секунд перед каждым запросом к Spotify
+    time.sleep(10.0)
+    
     token = get_spotify_token()
     if not token:
         return None, None
