@@ -370,60 +370,86 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     status_msg = await update.message.reply_text("🔍 Получаю информацию...")
     
     try:
-        # Получаем данные через Spotify API (без ISRC)
-        if type_ == "track":
-            track_data = get_track_data(album_id)
-            if not track_data:
-                await status_msg.edit_text("❌ Не удалось получить данные трека")
-                return
-            
+        # ========== 1. СНАЧАЛА ПОЛУЧАЕМ ISRC ЧЕРЕЗ ISRC FINDER ==========
+        isrcs = get_isrc_from_isrcfinder(album_id)
+        upc = get_upc_from_isrcfinder(album_id)
+        
+        # ========== 2. ПОТОМ ПОЛУЧАЕМ МЕТАДАННЫЕ ЧЕРЕЗ SPOTIFY API ==========
+        # Пробуем получить данные с задержкой и повторными попытками
+        album_data = None
+        tracks = []
+        
+        for attempt in range(3):
+            try:
+                # Ждём перед запросом
+                time.sleep(2.0 * (attempt + 1))
+                
+                if type_ == "track":
+                    track_data = get_track_data(album_id)
+                    if track_data:
+                        album_data = {
+                            'name': track_data.get('name', 'Неизвестно'),
+                            'artists': track_data.get('artists', [{'name': 'Неизвестно'}]),
+                            'release_date': track_data.get('album', {}).get('release_date', 'Неизвестно'),
+                            'total_tracks': 1,
+                            'images': track_data.get('album', {}).get('images', []),
+                            'external_ids': {'upc': upc or 'Неизвестно'},
+                        }
+                        tracks = [{
+                            'name': track_data.get('name', 'Без названия'),
+                            'duration_ms': track_data.get('duration_ms', 0),
+                            'external_ids': {'isrc': isrcs.get(track_data.get('name'), 'Не найден')}
+                        }]
+                        break
+                else:
+                    album_data, tracks = get_album_metadata(album_id)
+                    if album_data:
+                        # Добавляем ISRC к трекам
+                        for track in tracks:
+                            track_name = track.get('name', '')
+                            if track_name in isrcs:
+                                track['external_ids'] = {'isrc': isrcs[track_name]}
+                            else:
+                                track['external_ids'] = {'isrc': 'Не найден'}
+                        break
+                        
+            except Exception as e:
+                logger.warning(f"Попытка {attempt+1}/3 получить метаданные: {e}")
+                if attempt == 2:
+                    # Если не получилось — используем только ISRC Finder
+                    album_data = {
+                        'name': 'Неизвестно (используйте isrcfinder.com)',
+                        'artists': [{'name': 'Неизвестно'}],
+                        'release_date': 'Неизвестно',
+                        'total_tracks': len(isrcs),
+                        'images': [],
+                        'external_ids': {'upc': upc or 'Неизвестно'},
+                    }
+                    # Создаём треки из ISRC
+                    tracks = []
+                    for i, (track_name, isrc) in enumerate(isrcs.items(), 1):
+                        tracks.append({
+                            'name': track_name,
+                            'duration_ms': 0,
+                            'external_ids': {'isrc': isrc}
+                        })
+                    if not tracks:
+                        tracks = [{'name': 'Трек не найден', 'duration_ms': 0, 'external_ids': {'isrc': 'Не найден'}}]
+        
+        # Если album_data так и не получен
+        if not album_data:
             album_data = {
-                'name': track_data.get('name', 'Неизвестно'),
-                'artists': track_data.get('artists', [{'name': 'Неизвестно'}]),
-                'release_date': track_data.get('album', {}).get('release_date', 'Неизвестно'),
-                'total_tracks': 1,
-                'images': track_data.get('album', {}).get('images', []),
-                'external_ids': {'upc': 'Неизвестно'},
+                'name': 'Неизвестно',
+                'artists': [{'name': 'Неизвестно'}],
+                'release_date': 'Неизвестно',
+                'total_tracks': len(isrcs) or 1,
+                'images': [],
+                'external_ids': {'upc': upc or 'Неизвестно'},
             }
-            
-            tracks = [{
-                'name': track_data.get('name', 'Без названия'),
-                'duration_ms': track_data.get('duration_ms', 0),
-                'external_ids': track_data.get('external_ids', {})
-            }]
-            
-            # Для трека ISRC уже есть в ответе
-            if 'external_ids' in track_data:
-                isrcs = {track_data.get('name'): track_data['external_ids'].get('isrc', 'Не найден')}
-            else:
-                isrcs = {}
-            
-            upc = album_data.get('external_ids', {}).get('upc', 'Неизвестно')
-            
-        else:
-            # Получаем метаданные альбома
-            album_data, tracks = get_album_metadata(album_id)
-            if not album_data:
-                await status_msg.edit_text("❌ Не удалось получить данные альбома")
-                return
-            
-            # Парсим ISRC через isrcfinder.com
-            isrcs = get_isrc_from_isrcfinder(album_id)
-            
-            # Получаем UPC через isrcfinder.com
-            upc = get_upc_from_isrcfinder(album_id)
-            if not upc:
-                upc = album_data.get('external_ids', {}).get('upc', 'Неизвестно')
+            if not tracks:
+                tracks = [{'name': 'Трек не найден', 'duration_ms': 0, 'external_ids': {'isrc': 'Не найден'}}]
         
-        # Добавляем ISRC к трекам
-        for track in tracks:
-            track_name = track.get('name', '')
-            if track_name in isrcs:
-                track['external_ids'] = {'isrc': isrcs[track_name]}
-            elif 'external_ids' not in track:
-                track['external_ids'] = {}
-        
-        # Получаем жанры через Apify
+        # ========== 3. ЖАНРЫ ==========
         genres = get_album_genre_via_apify(url)
         if not genres:
             genres = "Не указан"
@@ -432,6 +458,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         artist = album_data['artists'][0]['name'] if album_data.get('artists') else 'Неизвестно'
         release_date = album_data.get('release_date', 'Неизвестно')
         total_tracks = album_data.get('total_tracks', len(tracks))
+        upc = album_data.get('external_ids', {}).get('upc', upc or 'Неизвестно')
         
         # ========== ШАПКА ==========
         header = f"📀 *{name}*\n"
@@ -468,7 +495,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                     document=InputFile(cover_buffer, filename="cover.jpg")
                 )
         
-        # Текст (если влезает — одним сообщением, если нет — двумя)
+        # Текст
         if len(full_text) <= 4096:
             await update.message.reply_text(full_text, parse_mode="Markdown")
         else:
@@ -482,9 +509,8 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(second_part, parse_mode="Markdown")
             
     except Exception as e:
-        logger.error(f"Ошибка обработки Spotify: {e}")
+        logger.error(f"Ошибка обработки: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
-
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Конвертация MP3 в WAV"""
