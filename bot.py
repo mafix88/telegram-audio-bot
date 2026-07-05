@@ -475,7 +475,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Принудительно удаляем вебхук перед запуском (решает 409 Conflict)
+    
+        # Удаляем вебхук (синхронный вызов)
     try:
         app.bot.delete_webhook(drop_pending_updates=True)
         print("✅ Webhook удалён")
