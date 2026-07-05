@@ -118,8 +118,8 @@ def get_album_data(album_id):
                     # Пробуем получить ISRC с повторными попытками
                     for attempt in range(5):  # максимум 5 попыток
                         try:
-                            # Задержка 1 секунда между запросами
-                            time.sleep(1.0)
+                            # Задержка 3 секунды между запросами (безопасно для Spotify)
+                            time.sleep(3.0)
                             
                             track_detail_resp = requests.get(
                                 f"https://api.spotify.com/v1/tracks/{track_id}",
@@ -127,9 +127,9 @@ def get_album_data(album_id):
                                 timeout=30
                             )
                             
-                            # Если 429 — пробуем снова
+                            # Если 429 — пробуем снова с большей задержкой
                             if track_detail_resp.status_code == 429:
-                                wait_time = (attempt + 1) * 2  # 2, 4, 6, 8, 10 секунд
+                                wait_time = (attempt + 1) * 3  # 3, 6, 9, 12, 15 секунд
                                 logger.warning(f"Rate limit (429), ждём {wait_time} секунд...")
                                 time.sleep(wait_time)
                                 continue
@@ -146,13 +146,25 @@ def get_album_data(album_id):
                             track['duration_ms'] = track_detail.get('duration_ms', track.get('duration_ms'))
                             break  # Успешно — выходим из цикла попыток
                             
+                        except requests.exceptions.HTTPError as e:
+                            if e.response.status_code == 429:
+                                wait_time = (attempt + 1) * 3
+                                logger.warning(f"Rate limit 429, ждём {wait_time} секунд...")
+                                time.sleep(wait_time)
+                                continue
+                            elif attempt == 4:  # Последняя попытка
+                                logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
+                                track['external_ids'] = {}
+                            else:
+                                logger.warning(f"Ошибка при запросе трека {track_id}, повторная попытка {attempt+1}/5")
+                                time.sleep(2.0)
                         except Exception as e:
                             if attempt == 4:  # Последняя попытка
                                 logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
                                 track['external_ids'] = {}
                             else:
                                 logger.warning(f"Ошибка при запросе трека {track_id}, повторная попытка {attempt+1}/5")
-                                time.sleep(1.0)
+                                time.sleep(2.0)
                 
                 tracks.append(track)
             
