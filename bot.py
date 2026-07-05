@@ -116,9 +116,9 @@ def get_album_data(album_id):
                 track_id = track.get("id")
                 if track_id:
                     # Пробуем получить ISRC с повторными попытками
-                    for attempt in range(5):  # максимум 5 попыток
+                    for attempt in range(6):  # максимум 6 попыток
                         try:
-                            # Задержка 3 секунды между запросами (безопасно для Spotify)
+                            # Задержка 3 секунды между запросами
                             time.sleep(3.0)
                             
                             track_detail_resp = requests.get(
@@ -127,11 +127,12 @@ def get_album_data(album_id):
                                 timeout=30
                             )
                             
-                            # Если 429 — пробуем снова с большей задержкой
+                            # Если 429 — пробуем снова с задержкой из Retry-After
                             if track_detail_resp.status_code == 429:
-                                wait_time = (attempt + 1) * 3  # 3, 6, 9, 12, 15 секунд
-                                logger.warning(f"Rate limit (429), ждём {wait_time} секунд...")
-                                time.sleep(wait_time)
+                                # Пытаемся получить Retry-After, если нет — ждём 10 секунд
+                                retry_after = int(track_detail_resp.headers.get('Retry-After', 10))
+                                logger.warning(f"Rate limit (429) для трека {track_id}. Ждём {retry_after} секунд...")
+                                time.sleep(retry_after)
                                 continue
                             
                             track_detail_resp.raise_for_status()
@@ -148,23 +149,23 @@ def get_album_data(album_id):
                             
                         except requests.exceptions.HTTPError as e:
                             if e.response.status_code == 429:
-                                wait_time = (attempt + 1) * 3
-                                logger.warning(f"Rate limit 429, ждём {wait_time} секунд...")
-                                time.sleep(wait_time)
+                                retry_after = int(e.response.headers.get('Retry-After', 10))
+                                logger.warning(f"Rate limit 429, ждём {retry_after} секунд...")
+                                time.sleep(retry_after)
                                 continue
-                            elif attempt == 4:  # Последняя попытка
+                            elif attempt == 5:  # Последняя попытка
                                 logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
                                 track['external_ids'] = {}
                             else:
-                                logger.warning(f"Ошибка при запросе трека {track_id}, повторная попытка {attempt+1}/5")
-                                time.sleep(2.0)
+                                logger.warning(f"Ошибка при запросе трека {track_id}, повторная попытка {attempt+1}/6")
+                                time.sleep(5.0)
                         except Exception as e:
-                            if attempt == 4:  # Последняя попытка
+                            if attempt == 5:  # Последняя попытка
                                 logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
                                 track['external_ids'] = {}
                             else:
-                                logger.warning(f"Ошибка при запросе трека {track_id}, повторная попытка {attempt+1}/5")
-                                time.sleep(2.0)
+                                logger.warning(f"Ошибка при запросе трека {track_id}, повторная попытка {attempt+1}/6")
+                                time.sleep(5.0)
                 
                 tracks.append(track)
             
@@ -473,6 +474,13 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Принудительно удаляем вебхук перед запуском (решает 409 Conflict)
+    try:
+        app.bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook удалён")
+    except Exception as e:
+        print(f"⚠️ Не удалось удалить webhook: {e}")
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
