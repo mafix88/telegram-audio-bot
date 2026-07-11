@@ -255,7 +255,35 @@ def get_album_genre_via_apify(album_url):
     except Exception as e:
         logger.error(f"Ошибка Apify: {e}")
         return None
+# ==================== APPLE MUSIC API ====================
 
+def get_apple_music_artist_url(artist_name):
+    """Получение ссылки на Apple Music через поиск"""
+    try:
+        # Кодируем имя для URL
+        encoded_name = quote_plus(artist_name)
+        
+        # Apple Music поиск через публичный API
+        url = f"https://itunes.apple.com/search?term={encoded_name}&entity=musicArtist&limit=1"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('results') and len(data['results']) > 0:
+            artist_id = data['results'][0].get('artistId')
+            if artist_id:
+                return f"https://music.apple.com/artist/{artist_id}"
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения Apple Music ссылки для {artist_name}: {e}")
+        return None
 
 # ==================== КОМАНДЫ БОТА ====================
 
@@ -323,11 +351,29 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await status_msg.edit_text("❌ Не удалось получить данные трека")
                 return
             
+            # Все исполнители трека с ссылками
+            artists = []
+            for artist in track_data.get('artists', []):
+                artist_name = artist.get('name', 'Неизвестно')
+                artist_id = artist.get('id')
+                
+                spotify_url = f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
+                
+                # Получаем Apple Music ссылку (с задержкой)
+                time.sleep(0.3)
+                apple_url = get_apple_music_artist_url(artist_name)
+                
+                artists.append({
+                    'name': artist_name,
+                    'spotify_url': spotify_url,
+                    'apple_url': apple_url
+                })
+            
             track_data['explicit'] = track_data.get('explicit', False)
             
             album_data = {
                 'name': track_data.get('name', 'Неизвестно'),
-                'artists': track_data.get('artists', [{'name': 'Неизвестно'}]),
+                'artists': artists,
                 'release_date': track_data.get('album', {}).get('release_date', 'Неизвестно'),
                 'total_tracks': 1,
                 'images': track_data.get('album', {}).get('images', []),
@@ -341,24 +387,67 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not album_data:
                 await status_msg.edit_text("❌ Не удалось получить данные альбома")
                 return
+            
+            # Все исполнители альбома с ссылками
+            artists = []
+            for artist in album_data.get('artists', []):
+                artist_name = artist.get('name', 'Неизвестно')
+                artist_id = artist.get('id')
+                
+                spotify_url = f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
+                
+                # Получаем Apple Music ссылку (с задержкой)
+                time.sleep(0.3)
+                apple_url = get_apple_music_artist_url(artist_name)
+                
+                artists.append({
+                    'name': artist_name,
+                    'spotify_url': spotify_url,
+                    'apple_url': apple_url
+                })
+            album_data['artists'] = artists
         
         genres = get_album_genre_via_apify(url)
         if not genres:
             genres = "Не указан"
         
         name = album_data.get('name', 'Неизвестно')
-        artist = album_data['artists'][0]['name'] if album_data.get('artists') else 'Неизвестно'
+        
+        # Формируем строку с исполнителями + ссылки
+        artist_text = ""
+        artists_list = album_data.get('artists', [{'name': 'Неизвестно'}])
+        
+        for i, artist in enumerate(artists_list):
+            artist_name = artist.get('name', 'Неизвестно')
+            spotify_url = artist.get('spotify_url')
+            apple_url = artist.get('apple_url')
+            
+            # Формируем ссылки
+            links = []
+            if spotify_url:
+                links.append(f"[Spotify]({spotify_url})")
+            if apple_url:
+                links.append(f"[Apple]({apple_url})")
+            
+            if links:
+                artist_text += f"{artist_name} ({', '.join(links)})"
+            else:
+                artist_text += artist_name
+            
+            if i < len(artists_list) - 1:
+                artist_text += ", "
+        
         release_date = album_data.get('release_date', 'Неизвестно')
         total_tracks = album_data.get('total_tracks', len(tracks))
         upc = album_data.get('external_ids', {}).get('upc', 'Неизвестно')
         
-        # Проверяем, есть ли explicit треки в альбоме
+        # Проверяем explicit
         explicit_album = any(track.get('explicit', False) for track in tracks)
         explicit_text = "🔞 Содержит нецензурную лексику" if explicit_album else "✅ Без нецензурной лексики"
         
         # ========== ШАПКА ==========
         header = f"📀 *{name}*\n"
-        header += f"👤 *Исполнитель:* {artist}\n"
+        header += f"👤 *Исполнитель:* {artist_text}\n"
         header += f"📅 *Дата выхода:* {release_date}\n"
         header += f"🎵 *Треков:* {total_tracks}\n"
         header += f"🏷️ *UPC:* `{upc}`\n"
@@ -366,7 +455,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         header += f"{explicit_text}\n\n"
         header += "*🎶 Треки:*\n"
         
-        # ========== ФОРМИРУЕМ СПИСОК ТРЕКОВ (ВСЕ!) ==========
+        # ========== ФОРМИРУЕМ СПИСОК ТРЕКОВ ==========
         all_tracks_text = ""
         for i, track in enumerate(tracks, 1):
             track_name = track.get('name', 'Без названия')
@@ -374,7 +463,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             isrc = track.get('external_ids', {}).get('isrc', 'Не найден')
             is_explicit = track.get('explicit', False)
             
-            # Добавляем иконку для explicit треков
             explicit_icon = "🔞 " if is_explicit else "✅ "
             
             if isrc != 'Не найден':
