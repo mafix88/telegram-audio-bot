@@ -83,7 +83,7 @@ def extract_album_id(url):
 
 
 def get_album_data(album_id):
-    """Получение данных об альбоме с ISRC для каждого трека"""
+    """Получение данных об альбоме с ISRC и explicit для каждого трека"""
     token = get_spotify_token()
     if not token:
         return None, None
@@ -128,16 +128,20 @@ def get_album_data(album_id):
                         track_detail_resp.raise_for_status()
                         track_detail = track_detail_resp.json()
                         
+                        # Получаем ISRC
                         isrc = track_detail.get('external_ids', {}).get('isrc')
                         if isrc:
                             track['external_ids'] = {'isrc': isrc}
                         else:
                             track['external_ids'] = {}
                         
+                        # ПОЛУЧАЕМ EXPLICIT ФЛАГ
+                        track['explicit'] = track_detail.get('explicit', False)
                         track['duration_ms'] = track_detail.get('duration_ms', track.get('duration_ms'))
                     except Exception as e:
-                        logger.warning(f"Не удалось получить ISRC для трека {track_id}: {e}")
+                        logger.warning(f"Не удалось получить данные для трека {track_id}: {e}")
                         track['external_ids'] = {}
+                        track['explicit'] = False
                 
                 tracks.append(track)
             
@@ -153,7 +157,7 @@ def get_album_data(album_id):
 
 
 def get_track_data(track_id):
-    """Получение данных о треке"""
+    """Получение данных о треке с explicit-информацией"""
     token = get_spotify_token()
     if not token:
         return None
@@ -167,7 +171,13 @@ def get_track_data(track_id):
             timeout=15
         )
         track_resp.raise_for_status()
-        return track_resp.json()
+        track_data = track_resp.json()
+        
+        # Добавляем explicit флаг, если его нет
+        if 'explicit' not in track_data:
+            track_data['explicit'] = track_data.get('explicit', False)
+        
+        return track_data
         
     except Exception as e:
         logger.error(f"Ошибка получения данных трека: {e}")
@@ -258,6 +268,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📀 *Информация о релизе:*
    Отправьте ссылку на альбом или трек Spotify
    → Получите всю информацию + обложку 3000x3000 JPG
+   → Бот определит наличие нецензурной лексики (🔞)
 
 🎵 *Конвертация MP3 → WAV:*
    Отправьте MP3 файл
@@ -283,6 +294,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 3️⃣ *Команды:*
    /start — приветствие
    /help — эта справка
+
+*ℹ️ Информация о explicit:*
+🔞 — трек содержит нецензурную лексику
+✅ — трек без нецензурной лексики
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -307,6 +322,8 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not track_data:
                 await status_msg.edit_text("❌ Не удалось получить данные трека")
                 return
+            
+            track_data['explicit'] = track_data.get('explicit', False)
             
             album_data = {
                 'name': track_data.get('name', 'Неизвестно'),
@@ -335,13 +352,18 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         total_tracks = album_data.get('total_tracks', len(tracks))
         upc = album_data.get('external_ids', {}).get('upc', 'Неизвестно')
         
+        # Проверяем, есть ли explicit треки в альбоме
+        explicit_album = any(track.get('explicit', False) for track in tracks)
+        explicit_text = "🔞 Содержит нецензурную лексику" if explicit_album else "✅ Без нецензурной лексики"
+        
         # ========== ШАПКА ==========
         header = f"📀 *{name}*\n"
         header += f"👤 *Исполнитель:* {artist}\n"
         header += f"📅 *Дата выхода:* {release_date}\n"
         header += f"🎵 *Треков:* {total_tracks}\n"
         header += f"🏷️ *UPC:* `{upc}`\n"
-        header += f"🎸 *Жанр:* {genres}\n\n"
+        header += f"🎸 *Жанр:* {genres}\n"
+        header += f"{explicit_text}\n\n"
         header += "*🎶 Треки:*\n"
         
         # ========== ФОРМИРУЕМ СПИСОК ТРЕКОВ (ВСЕ!) ==========
@@ -350,11 +372,15 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             track_name = track.get('name', 'Без названия')
             duration = ms_to_min_sec(track.get('duration_ms'))
             isrc = track.get('external_ids', {}).get('isrc', 'Не найден')
+            is_explicit = track.get('explicit', False)
+            
+            # Добавляем иконку для explicit треков
+            explicit_icon = "🔞 " if is_explicit else "✅ "
             
             if isrc != 'Не найден':
-                all_tracks_text += f"{i}. `{track_name}` ({duration}) ISRC: `{isrc}`\n"
+                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` ({duration}) ISRC: `{isrc}`\n"
             else:
-                all_tracks_text += f"{i}. `{track_name}` ({duration}) ISRC: Не найден\n"
+                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` ({duration}) ISRC: Не найден\n"
         
         # ========== ОТПРАВКА ==========
         full_text = header + all_tracks_text
