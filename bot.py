@@ -83,7 +83,7 @@ def extract_album_id(url):
 
 
 def get_album_data(album_id):
-    """Получение данных об альбоме с ISRC и explicit для каждого трека"""
+    """Получение данных об альбоме с ISRC, explicit, авторами и композиторами"""
     token = get_spotify_token()
     if not token:
         return None, None
@@ -128,20 +128,33 @@ def get_album_data(album_id):
                         track_detail_resp.raise_for_status()
                         track_detail = track_detail_resp.json()
                         
-                        # Получаем ISRC
+                        # ISRC
                         isrc = track_detail.get('external_ids', {}).get('isrc')
-                        if isrc:
-                            track['external_ids'] = {'isrc': isrc}
-                        else:
-                            track['external_ids'] = {}
+                        track['external_ids'] = {'isrc': isrc} if isrc else {}
                         
-                        # ПОЛУЧАЕМ EXPLICIT ФЛАГ
+                        # Explicit
                         track['explicit'] = track_detail.get('explicit', False)
                         track['duration_ms'] = track_detail.get('duration_ms', track.get('duration_ms'))
+                        
+                        # ===== ИСПОЛНИТЕЛИ ТРЕКА =====
+                        track['track_artists'] = []
+                        for artist in track_detail.get('artists', []):
+                            track['track_artists'].append({
+                                'name': artist.get('name', 'Неизвестно'),
+                                'id': artist.get('id')
+                            })
+                        
+                        # ===== АВТОРЫ И КОМПОЗИТОРЫ =====
+                        track['writers'] = []
+                        track['composers'] = []
+                        
                     except Exception as e:
                         logger.warning(f"Не удалось получить данные для трека {track_id}: {e}")
                         track['external_ids'] = {}
                         track['explicit'] = False
+                        track['track_artists'] = []
+                        track['writers'] = []
+                        track['composers'] = []
                 
                 tracks.append(track)
             
@@ -255,15 +268,14 @@ def get_album_genre_via_apify(album_url):
     except Exception as e:
         logger.error(f"Ошибка Apify: {e}")
         return None
+
+
 # ==================== APPLE MUSIC API ====================
 
 def get_apple_music_artist_url(artist_name):
     """Получение ссылки на Apple Music через поиск"""
     try:
-        # Кодируем имя для URL
         encoded_name = quote_plus(artist_name)
-        
-        # Apple Music поиск через публичный API
         url = f"https://itunes.apple.com/search?term={encoded_name}&entity=musicArtist&limit=1"
         
         headers = {
@@ -284,6 +296,7 @@ def get_apple_music_artist_url(artist_name):
     except Exception as e:
         logger.error(f"Ошибка получения Apple Music ссылки для {artist_name}: {e}")
         return None
+
 
 # ==================== КОМАНДЫ БОТА ====================
 
@@ -351,29 +364,27 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await status_msg.edit_text("❌ Не удалось получить данные трека")
                 return
             
-            # Все исполнители трека с ссылками
-            artists = []
+            # Исполнители трека
+            track_artists = []
             for artist in track_data.get('artists', []):
-                artist_name = artist.get('name', 'Неизвестно')
+                track_artists.append(artist.get('name', 'Неизвестно'))
+            
+            # Исполнители альбома (все)
+            album_artists = []
+            for artist in track_data.get('album', {}).get('artists', []):
                 artist_id = artist.get('id')
-                
-                spotify_url = f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
-                
-                # Получаем Apple Music ссылку (с задержкой)
-                time.sleep(0.3)
-                apple_url = get_apple_music_artist_url(artist_name)
-                
-                artists.append({
-                    'name': artist_name,
-                    'spotify_url': spotify_url,
-                    'apple_url': apple_url
+                album_artists.append({
+                    'name': artist.get('name', 'Неизвестно'),
+                    'id': artist_id,
+                    'spotify_url': f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
                 })
             
             track_data['explicit'] = track_data.get('explicit', False)
+            track_data['track_artists'] = track_artists
             
             album_data = {
                 'name': track_data.get('name', 'Неизвестно'),
-                'artists': artists,
+                'artists': album_artists,
                 'release_date': track_data.get('album', {}).get('release_date', 'Неизвестно'),
                 'total_tracks': 1,
                 'images': track_data.get('album', {}).get('images', []),
@@ -388,24 +399,16 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await status_msg.edit_text("❌ Не удалось получить данные альбома")
                 return
             
-            # Все исполнители альбома с ссылками
-            artists = []
+            # Все исполнители альбома (для шапки)
+            album_artists = []
             for artist in album_data.get('artists', []):
-                artist_name = artist.get('name', 'Неизвестно')
                 artist_id = artist.get('id')
-                
-                spotify_url = f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
-                
-                # Получаем Apple Music ссылку (с задержкой)
-                time.sleep(0.3)
-                apple_url = get_apple_music_artist_url(artist_name)
-                
-                artists.append({
-                    'name': artist_name,
-                    'spotify_url': spotify_url,
-                    'apple_url': apple_url
+                album_artists.append({
+                    'name': artist.get('name', 'Неизвестно'),
+                    'id': artist_id,
+                    'spotify_url': f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
                 })
-            album_data['artists'] = artists
+            album_data['artists'] = album_artists
         
         genres = get_album_genre_via_apify(url)
         if not genres:
@@ -413,41 +416,31 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         name = album_data.get('name', 'Неизвестно')
         
-        # Формируем строку с исполнителями + ссылки
-        artist_text = ""
+        # Формируем исполнителей альбома (шапка)
+        album_artist_text = ""
         artists_list = album_data.get('artists', [{'name': 'Неизвестно'}])
-        
         for i, artist in enumerate(artists_list):
             artist_name = artist.get('name', 'Неизвестно')
             spotify_url = artist.get('spotify_url')
-            apple_url = artist.get('apple_url')
             
-            # Формируем ссылки
-            links = []
             if spotify_url:
-                links.append(f"[Spotify]({spotify_url})")
-            if apple_url:
-                links.append(f"[Apple]({apple_url})")
-            
-            if links:
-                artist_text += f"{artist_name} ({', '.join(links)})"
+                album_artist_text += f"[{artist_name}]({spotify_url})"
             else:
-                artist_text += artist_name
+                album_artist_text += artist_name
             
             if i < len(artists_list) - 1:
-                artist_text += ", "
+                album_artist_text += ", "
         
         release_date = album_data.get('release_date', 'Неизвестно')
         total_tracks = album_data.get('total_tracks', len(tracks))
         upc = album_data.get('external_ids', {}).get('upc', 'Неизвестно')
         
-        # Проверяем explicit
         explicit_album = any(track.get('explicit', False) for track in tracks)
         explicit_text = "🔞 Содержит нецензурную лексику" if explicit_album else "✅ Без нецензурной лексики"
         
         # ========== ШАПКА ==========
         header = f"📀 *{name}*\n"
-        header += f"👤 *Исполнитель:* {artist_text}\n"
+        header += f"👤 *Исполнитель:* {album_artist_text}\n"
         header += f"📅 *Дата выхода:* {release_date}\n"
         header += f"🎵 *Треков:* {total_tracks}\n"
         header += f"🏷️ *UPC:* `{upc}`\n"
@@ -455,7 +448,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         header += f"{explicit_text}\n\n"
         header += "*🎶 Треки:*\n"
         
-        # ========== ФОРМИРУЕМ СПИСОК ТРЕКОВ ==========
+        # ========== ФОРМИРУЕМ СПИСОК ТРЕКОВ С ИСПОЛНИТЕЛЯМИ ==========
         all_tracks_text = ""
         for i, track in enumerate(tracks, 1):
             track_name = track.get('name', 'Без названия')
@@ -463,12 +456,22 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             isrc = track.get('external_ids', {}).get('isrc', 'Не найден')
             is_explicit = track.get('explicit', False)
             
+            # Исполнители этого трека
+            track_artists = track.get('track_artists', [])
+            if track_artists and len(track_artists) > 0:
+                if isinstance(track_artists[0], dict):
+                    artists_str = ", ".join([a.get('name', 'Неизвестно') for a in track_artists])
+                else:
+                    artists_str = ", ".join(track_artists)
+            else:
+                artists_str = ", ".join([a.get('name', 'Неизвестно') for a in album_data.get('artists', [{'name': 'Неизвестно'}])])
+            
             explicit_icon = "🔞 " if is_explicit else "✅ "
             
             if isrc != 'Не найден':
-                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` ({duration}) ISRC: `{isrc}`\n"
+                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: `{isrc}`\n"
             else:
-                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` ({duration}) ISRC: Не найден\n"
+                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: Не найден\n"
         
         # ========== ОТПРАВКА ==========
         full_text = header + all_tracks_text
