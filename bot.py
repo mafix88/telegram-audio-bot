@@ -227,15 +227,12 @@ def ms_to_min_sec(ms):
     return f"{minutes}:{seconds:02d}"
 
 
-# ==================== APPLE MUSIC ПО ISRC (САМЫЙ НАДЁЖНЫЙ) ====================
+# ==================== APPLE MUSIC (АВТОРЫ) ====================
 
-def get_track_credits_from_apple_isrc(isrc):
-    """Получение авторов и композиторов через Apple Music по ISRC"""
-    if not isrc or isrc == 'Не найден':
-        return [], []
-    
+def get_track_credits_from_apple(track_name, artist_name):
+    """Получение авторов через Apple Music API"""
     try:
-        search_url = f"https://itunes.apple.com/search?term={isrc}&entity=song&limit=1"
+        search_url = f"https://itunes.apple.com/search?term={quote_plus(track_name)} {quote_plus(artist_name)}&entity=song&limit=1"
         
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -265,14 +262,85 @@ def get_track_credits_from_apple_isrc(isrc):
         return [], []
         
     except Exception as e:
-        logger.error(f"Ошибка получения данных с Apple Music по ISRC {isrc}: {e}")
+        logger.error(f"Ошибка Apple Music для {track_name}: {e}")
+        return [], []
+
+
+# ==================== APPLE MUSIC PAGE (ПАРСИНГ СТРАНИЦЫ) ====================
+
+def get_track_credits_from_apple_page(track_name, artist_name):
+    """Парсинг страницы Apple Music для получения авторов"""
+    try:
+        search_url = f"https://itunes.apple.com/search?term={quote_plus(track_name)} {quote_plus(artist_name)}&entity=song&limit=1"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(search_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('results') and len(data['results']) > 0:
+            track_id = data['results'][0].get('trackId')
+            if track_id:
+                page_url = f"https://music.apple.com/track/{track_id}"
+                page_response = requests.get(page_url, headers=headers, timeout=10)
+                page_response.raise_for_status()
+                
+                soup = BeautifulSoup(page_response.text, 'html.parser')
+                text = soup.get_text()
+                
+                writers = []
+                composers = []
+                
+                if 'Written by' in text:
+                    written_section = re.search(r'Written by(.*?)(?=Produced by|$)', text, re.DOTALL)
+                    if written_section:
+                        names = re.findall(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', written_section.group(1))
+                        writers = [name.strip() for name in names if name.strip()]
+                
+                if not writers and 'Composed by' in text:
+                    composed_section = re.search(r'Composed by(.*?)(?=Produced by|$)', text, re.DOTALL)
+                    if composed_section:
+                        names = re.findall(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', composed_section.group(1))
+                        composers = [name.strip() for name in names if name.strip()]
+                
+                scripts = soup.find_all('script', type='application/ld+json')
+                for script in scripts:
+                    try:
+                        if script.string:
+                            data_json = json.loads(script.string)
+                            def find_composers(obj):
+                                if isinstance(obj, dict):
+                                    if 'composer' in obj:
+                                        composer = obj['composer']
+                                        if isinstance(composer, dict) and 'name' in composer:
+                                            composers.append(composer['name'])
+                                        elif isinstance(composer, str):
+                                            composers.append(composer)
+                                    for key, value in obj.items():
+                                        find_composers(value)
+                                elif isinstance(obj, list):
+                                    for item in obj:
+                                        find_composers(item)
+                            find_composers(data_json)
+                    except:
+                        continue
+                
+                return writers, composers
+        
+        return [], []
+        
+    except Exception as e:
+        logger.error(f"Ошибка парсинга Apple Music для {track_name}: {e}")
         return [], []
 
 
 # ==================== SPOTIFY CREDITS (ПАРСИНГ СТРАНИЦЫ) ====================
 
 def get_track_credits_from_spotify_page(track_id):
-    """Парсинг страницы Spotify для получения авторов и композиторов"""
+    """Парсинг страницы Spotify для получения авторов"""
     try:
         url = f"https://open.spotify.com/track/{track_id}"
         
@@ -334,7 +402,6 @@ def get_track_credits_from_spotify_page(track_id):
         writers = []
         composers = []
         
-        # Ищем раздел "Композиция и текст"
         credits_section = re.search(r'Композиция и текст(.*?)(?=Продакшен|Сведения|$)', text, re.DOTALL)
         if credits_section:
             lines = credits_section.group(1).strip().split('\n')
@@ -349,7 +416,6 @@ def get_track_credits_from_spotify_page(track_id):
                         if line and len(line) > 1:
                             writers.append(line)
         
-        # Если не нашли русский, ищем английский
         if not writers and not composers:
             credits_section_en = re.search(r'Credits(.*?)(?=Producers|$)', text, re.DOTALL)
             if credits_section_en:
@@ -373,63 +439,48 @@ def get_track_credits_from_spotify_page(track_id):
         return [], []
 
 
-# ==================== ISRC SEARCH ====================
+# ==================== MUSICBRAINZ ====================
 
-def get_track_credits_from_isrc(isrc):
-    """Получение авторов и композиторов по ISRC через isrcfinder.com"""
-    if not isrc or isrc == 'Не найден':
-        return [], []
-    
+def get_track_credits_from_musicbrainz(track_name, artist_name):
+    """Получение авторов через MusicBrainz"""
     try:
-        url = f"https://www.isrcfinder.com/?q={isrc}"
+        url = f"https://musicbrainz.org/ws/2/recording?query={quote_plus(track_name)} AND artist:{quote_plus(artist_name)}&fmt=json"
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'MusicBot/1.0 (https://t.me/musicbot)'
         }
         
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
+        data = response.json()
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        text = soup.get_text()
+        if data.get('recordings') and len(data['recordings']) > 0:
+            recording = data['recordings'][0]
+            
+            writers = []
+            composers = []
+            
+            if recording.get('relations'):
+                for relation in recording.get('relations', []):
+                    if relation.get('type') == 'writer':
+                        if relation.get('artist', {}).get('name'):
+                            writers.append(relation['artist']['name'])
+                    elif relation.get('type') == 'composer':
+                        if relation.get('artist', {}).get('name'):
+                            composers.append(relation['artist']['name'])
+            return writers, composers
         
-        writers = []
-        composers = []
-        
-        writers_pattern = r'(?:Writer|Writers|Songwriter|Songwriters|Author|Authors|Lyricist)[:\s]+([^\n]+)'
-        writers_match = re.search(writers_pattern, text, re.IGNORECASE)
-        if writers_match:
-            writers = [w.strip() for w in writers_match.group(1).split(',') if w.strip()]
-        
-        composers_pattern = r'(?:Composer|Composers|Producer|Producers)[:\s]+([^\n]+)'
-        composers_match = re.search(composers_pattern, text, re.IGNORECASE)
-        if composers_match:
-            composers = [c.strip() for c in composers_match.group(1).split(',') if c.strip()]
-        
-        if not writers and not composers:
-            lines = text.split('\n')
-            for i, line in enumerate(lines):
-                if isrc in line:
-                    for j in range(i+1, min(i+6, len(lines))):
-                        if 'writer' in lines[j].lower() or 'composer' in lines[j].lower():
-                            clean_line = re.sub(r'(Writer|Composer|Author|Producer)[:\s]+', '', lines[j], flags=re.IGNORECASE)
-                            parts = [p.strip() for p in clean_line.split(',') if p.strip()]
-                            if 'writer' in lines[j].lower():
-                                writers.extend(parts)
-                            else:
-                                composers.extend(parts)
-        
-        return writers, composers
+        return [], []
         
     except Exception as e:
-        logger.error(f"Ошибка поиска по ISRC {isrc}: {e}")
+        logger.error(f"Ошибка MusicBrainz для {track_name}: {e}")
         return [], []
 
 
-# ==================== DEEZER API ====================
+# ==================== DEEZER ====================
 
 def get_track_credits_from_deezer(track_name, artist_name):
-    """Получение авторов и композиторов через Deezer API"""
+    """Получение авторов через Deezer API"""
     try:
         search_url = f"https://api.deezer.com/search?q={quote_plus(track_name)} {quote_plus(artist_name)}&limit=1"
         response = requests.get(search_url, timeout=10)
@@ -468,14 +519,14 @@ def get_track_credits_from_deezer(track_name, artist_name):
         return [], []
         
     except Exception as e:
-        logger.error(f"Ошибка получения данных с Deezer для {track_name}: {e}")
+        logger.error(f"Ошибка Deezer для {track_name}: {e}")
         return [], []
 
 
 # ==================== APIFY ====================
 
 def get_track_credits_from_apify(track_id):
-    """Получение авторов и композиторов через Apify Spotify Extended Scraper"""
+    """Получение авторов через Apify"""
     if not APIFY_API_TOKEN:
         return [], []
     
@@ -519,7 +570,7 @@ def get_track_credits_from_apify(track_id):
         return [], []
         
     except Exception as e:
-        logger.error(f"Ошибка получения кредитов через Apify: {e}")
+        logger.error(f"Ошибка Apify: {e}")
         return [], []
 
 
@@ -602,7 +653,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    Отправьте ссылку на альбом или трек Spotify
    → Получите всю информацию + обложку 3000x3000 JPG
    → Бот определит наличие нецензурной лексики (🔞)
-   → Авторы и композиторы (Apple Music по ISRC → Spotify Page → ISRC → Deezer → Apify)
+   → Авторы и композиторы (Apple Music → Spotify Page → MusicBrainz → Deezer → Apify)
 
 🎵 *Конвертация MP3 → WAV:*
    Отправьте MP3 файл
@@ -759,45 +810,52 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             first_artist = artists_str.split(',')[0].strip()
             track_id = track.get('id')
             
-            # 1. Apple Music по ISRC (самый надёжный)
-            if isrc and isrc != 'Не найден':
+            # 1. Apple Music
+            try:
+                time.sleep(0.3)
+                writers, composers = get_track_credits_from_apple(track_name, first_artist)
+            except Exception as e:
+                logger.warning(f"Apple Music API: {e}")
+            
+            # 2. Если нет — Apple Music Page
+            if not writers and not composers:
                 try:
                     time.sleep(0.3)
-                    writers, composers = get_track_credits_from_apple_isrc(isrc)
+                    writers, composers = get_track_credits_from_apple_page(track_name, first_artist)
                 except Exception as e:
-                    logger.warning(f"Не удалось получить авторов через Apple ISRC для {track_name}: {e}")
+                    logger.warning(f"Apple Music Page: {e}")
             
-            # 2. Если не нашли — парсим страницу Spotify
+            # 3. Если нет — Spotify Page
             if not writers and not composers and track_id:
                 try:
                     time.sleep(0.5)
                     writers, composers = get_track_credits_from_spotify_page(track_id)
                 except Exception as e:
-                    logger.warning(f"Не удалось получить авторов через страницу Spotify для {track_name}: {e}")
+                    logger.warning(f"Spotify Page: {e}")
             
-            # 3. Если Spotify не дал — пробуем ISRC Finder
-            if not writers and not composers and isrc and isrc != 'Не найден':
+            # 4. Если нет — MusicBrainz
+            if not writers and not composers:
                 try:
                     time.sleep(0.3)
-                    writers, composers = get_track_credits_from_isrc(isrc)
+                    writers, composers = get_track_credits_from_musicbrainz(track_name, first_artist)
                 except Exception as e:
-                    logger.warning(f"Не удалось получить авторов через ISRC для {track_name}: {e}")
+                    logger.warning(f"MusicBrainz: {e}")
             
-            # 4. Если ISRC не дал — пробуем Deezer
+            # 5. Если нет — Deezer
             if not writers and not composers:
                 try:
                     time.sleep(0.3)
                     writers, composers = get_track_credits_from_deezer(track_name, first_artist)
                 except Exception as e:
-                    logger.warning(f"Не удалось получить авторов через Deezer для {track_name}: {e}")
+                    logger.warning(f"Deezer: {e}")
             
-            # 5. Если Deezer не дал — пробуем Apify
+            # 6. Если нет — Apify
             if not writers and not composers and track_id and APIFY_API_TOKEN:
                 try:
                     time.sleep(0.5)
                     writers, composers = get_track_credits_from_apify(track_id)
                 except Exception as e:
-                    logger.warning(f"Не удалось получить авторов через Apify для {track_name}: {e}")
+                    logger.warning(f"Apify: {e}")
             
             # Формируем строку с авторами
             credits_text = ""
