@@ -225,6 +225,52 @@ def ms_to_min_sec(ms):
     return f"{minutes}:{seconds:02d}"
 
 
+# ==================== APPLE MUSIC (АВТОРЫ И КОМПОЗИТОРЫ) ====================
+
+def get_track_credits_from_apple(track_name, artist_name):
+    """Получение авторов и композиторов через Apple Music/iTunes API"""
+    try:
+        # Ищем трек на Apple Music
+        search_url = f"https://itunes.apple.com/search?term={quote_plus(track_name)} {quote_plus(artist_name)}&entity=song&limit=1"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(search_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('results') and len(data['results']) > 0:
+            track_data = data['results'][0]
+            
+            writers = []
+            composers = []
+            
+            # Apple Music иногда отдаёт авторов в поле 'composerName'
+            composer_name = track_data.get('composerName')
+            if composer_name:
+                # Может быть несколько авторов через запятую или /
+                if ',' in composer_name:
+                    composers = [c.strip() for c in composer_name.split(',')]
+                elif '/' in composer_name:
+                    composers = [c.strip() for c in composer_name.split('/')]
+                else:
+                    composers = [composer_name]
+            
+            # Пробуем найти авторов в других полях
+            # Иногда авторы в поле 'artistName' если это не исполнитель
+            # Но это редко
+            
+            return writers, composers
+        
+        return [], []
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения данных с Apple Music для {track_name}: {e}")
+        return [], []
+
+
 # ==================== DEEZER API (АВТОРЫ И КОМПОЗИТОРЫ) ====================
 
 def get_track_credits_from_deezer(track_name, artist_name):
@@ -365,7 +411,7 @@ def get_album_genre_via_apify(album_url):
         return None
 
 
-# ==================== APPLE MUSIC API ====================
+# ==================== APPLE MUSIC API (ССЫЛКИ) ====================
 
 def get_apple_music_artist_url(artist_name):
     """Получение ссылки на Apple Music через поиск"""
@@ -405,7 +451,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    Отправьте ссылку на альбом или трек Spotify
    → Получите всю информацию + обложку 3000x3000 JPG
    → Бот определит наличие нецензурной лексики (🔞)
-   → Авторы и композиторы (через Deezer + Apify)
+   → Авторы и композиторы (Apple Music → Deezer → Apify)
 
 🎵 *Конвертация MP3 → WAV:*
    Отправьте MP3 файл
@@ -566,15 +612,24 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             writers = []
             composers = []
             
-            # 1. Пробуем Deezer (основной источник)
+            first_artist = artists_str.split(',')[0].strip()
+            
+            # 1. Пробуем Apple Music (часто есть авторы)
             try:
                 time.sleep(0.3)
-                first_artist = artists_str.split(',')[0].strip()
-                writers, composers = get_track_credits_from_deezer(track_name, first_artist)
+                writers, composers = get_track_credits_from_apple(track_name, first_artist)
             except Exception as e:
-                logger.warning(f"Не удалось получить авторов через Deezer для {track_name}: {e}")
+                logger.warning(f"Не удалось получить авторов через Apple для {track_name}: {e}")
             
-            # 2. Если Deezer не дал результат — пробуем Apify
+            # 2. Если Apple не дал — пробуем Deezer
+            if not writers and not composers:
+                try:
+                    time.sleep(0.3)
+                    writers, composers = get_track_credits_from_deezer(track_name, first_artist)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить авторов через Deezer для {track_name}: {e}")
+            
+            # 3. Если Deezer не дал — пробуем Apify
             if not writers and not composers:
                 track_id = track.get('id')
                 if track_id and APIFY_API_TOKEN:
