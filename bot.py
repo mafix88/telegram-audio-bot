@@ -227,6 +227,48 @@ def ms_to_min_sec(ms):
     return f"{minutes}:{seconds:02d}"
 
 
+# ==================== APPLE MUSIC ПО ISRC (САМЫЙ НАДЁЖНЫЙ) ====================
+
+def get_track_credits_from_apple_isrc(isrc):
+    """Получение авторов и композиторов через Apple Music по ISRC"""
+    if not isrc or isrc == 'Не найден':
+        return [], []
+    
+    try:
+        search_url = f"https://itunes.apple.com/search?term={isrc}&entity=song&limit=1"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(search_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('results') and len(data['results']) > 0:
+            track_data = data['results'][0]
+            
+            writers = []
+            composers = []
+            
+            composer_name = track_data.get('composerName')
+            if composer_name:
+                if ',' in composer_name:
+                    composers = [c.strip() for c in composer_name.split(',')]
+                elif '/' in composer_name:
+                    composers = [c.strip() for c in composer_name.split('/')]
+                else:
+                    composers = [composer_name]
+            
+            return writers, composers
+        
+        return [], []
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения данных с Apple Music по ISRC {isrc}: {e}")
+        return [], []
+
+
 # ==================== SPOTIFY CREDITS (ПАРСИНГ СТРАНИЦЫ) ====================
 
 def get_track_credits_from_spotify_page(track_id):
@@ -331,7 +373,7 @@ def get_track_credits_from_spotify_page(track_id):
         return [], []
 
 
-# ==================== ISRC SEARCH (АВТОРЫ И КОМПОЗИТОРЫ) ====================
+# ==================== ISRC SEARCH ====================
 
 def get_track_credits_from_isrc(isrc):
     """Получение авторов и композиторов по ISRC через isrcfinder.com"""
@@ -384,46 +426,7 @@ def get_track_credits_from_isrc(isrc):
         return [], []
 
 
-# ==================== APPLE MUSIC (АВТОРЫ И КОМПОЗИТОРЫ) ====================
-
-def get_track_credits_from_apple(track_name, artist_name):
-    """Получение авторов и композиторов через Apple Music/iTunes API"""
-    try:
-        search_url = f"https://itunes.apple.com/search?term={quote_plus(track_name)} {quote_plus(artist_name)}&entity=song&limit=1"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(search_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('results') and len(data['results']) > 0:
-            track_data = data['results'][0]
-            
-            writers = []
-            composers = []
-            
-            composer_name = track_data.get('composerName')
-            if composer_name:
-                if ',' in composer_name:
-                    composers = [c.strip() for c in composer_name.split(',')]
-                elif '/' in composer_name:
-                    composers = [c.strip() for c in composer_name.split('/')]
-                else:
-                    composers = [composer_name]
-            
-            return writers, composers
-        
-        return [], []
-        
-    except Exception as e:
-        logger.error(f"Ошибка получения данных с Apple Music для {track_name}: {e}")
-        return [], []
-
-
-# ==================== DEEZER API (АВТОРЫ И КОМПОЗИТОРЫ) ====================
+# ==================== DEEZER API ====================
 
 def get_track_credits_from_deezer(track_name, artist_name):
     """Получение авторов и композиторов через Deezer API"""
@@ -469,7 +472,7 @@ def get_track_credits_from_deezer(track_name, artist_name):
         return [], []
 
 
-# ==================== APIFY (АВТОРЫ И КОМПОЗИТОРЫ - ЗАПАСНОЙ) ====================
+# ==================== APIFY ====================
 
 def get_track_credits_from_apify(track_id):
     """Получение авторов и композиторов через Apify Spotify Extended Scraper"""
@@ -559,7 +562,7 @@ def get_album_genre_via_apify(album_url):
         return None
 
 
-# ==================== APPLE MUSIC API (ССЫЛКИ) ====================
+# ==================== APPLE MUSIC (ССЫЛКИ) ====================
 
 def get_apple_music_artist_url(artist_name):
     """Получение ссылки на Apple Music через поиск"""
@@ -599,7 +602,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    Отправьте ссылку на альбом или трек Spotify
    → Получите всю информацию + обложку 3000x3000 JPG
    → Бот определит наличие нецензурной лексики (🔞)
-   → Авторы и композиторы (Spotify Page → ISRC → Apple → Deezer → Apify)
+   → Авторы и композиторы (Apple Music по ISRC → Spotify Page → ISRC → Deezer → Apify)
 
 🎵 *Конвертация MP3 → WAV:*
    Отправьте MP3 файл
@@ -756,15 +759,23 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             first_artist = artists_str.split(',')[0].strip()
             track_id = track.get('id')
             
-            # 1. Пробуем парсить страницу Spotify (самый надёжный)
-            if track_id:
+            # 1. Apple Music по ISRC (самый надёжный)
+            if isrc and isrc != 'Не найден':
+                try:
+                    time.sleep(0.3)
+                    writers, composers = get_track_credits_from_apple_isrc(isrc)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить авторов через Apple ISRC для {track_name}: {e}")
+            
+            # 2. Если не нашли — парсим страницу Spotify
+            if not writers and not composers and track_id:
                 try:
                     time.sleep(0.5)
                     writers, composers = get_track_credits_from_spotify_page(track_id)
                 except Exception as e:
                     logger.warning(f"Не удалось получить авторов через страницу Spotify для {track_name}: {e}")
             
-            # 2. Если Spotify не дал — пробуем через ISRC
+            # 3. Если Spotify не дал — пробуем ISRC Finder
             if not writers and not composers and isrc and isrc != 'Не найден':
                 try:
                     time.sleep(0.3)
@@ -772,15 +783,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except Exception as e:
                     logger.warning(f"Не удалось получить авторов через ISRC для {track_name}: {e}")
             
-            # 3. Если ISRC не дал — пробуем Apple Music
-            if not writers and not composers:
-                try:
-                    time.sleep(0.3)
-                    writers, composers = get_track_credits_from_apple(track_name, first_artist)
-                except Exception as e:
-                    logger.warning(f"Не удалось получить авторов через Apple для {track_name}: {e}")
-            
-            # 4. Если Apple не дал — пробуем Deezer
+            # 4. Если ISRC не дал — пробуем Deezer
             if not writers and not composers:
                 try:
                     time.sleep(0.3)
@@ -806,7 +809,11 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                     credit_parts.append(f"🎼 Композиция: {', '.join(composers)}")
                 credits_text = " | " + " | ".join(credit_parts)
             else:
-                credits_text = " | ℹ️ Авторы не найдены"
+                track_url = f"https://open.spotify.com/track/{track_id}" if track_id else ""
+                if track_url:
+                    credits_text = f" | ℹ️ [Авторы не найдены]({track_url}) — откройте 'Сведения' в Spotify"
+                else:
+                    credits_text = " | ℹ️ Авторы не найдены"
             
             explicit_icon = "🔞 " if is_explicit else "✅ "
             
