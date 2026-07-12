@@ -9,6 +9,7 @@ from io import BytesIO
 from PIL import Image
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -225,12 +226,68 @@ def ms_to_min_sec(ms):
     return f"{minutes}:{seconds:02d}"
 
 
+# ==================== ISRC SEARCH (АВТОРЫ И КОМПОЗИТОРЫ) ====================
+
+def get_track_credits_from_isrc(isrc):
+    """Получение авторов и композиторов по ISRC через isrcfinder.com"""
+    if not isrc or isrc == 'Не найден':
+        return [], []
+    
+    try:
+        url = f"https://www.isrcfinder.com/?q={isrc}"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        text = soup.get_text()
+        
+        writers = []
+        composers = []
+        
+        # Ищем авторов
+        writers_pattern = r'(?:Writer|Writers|Songwriter|Songwriters|Author|Authors|Lyricist)[:\s]+([^\n]+)'
+        writers_match = re.search(writers_pattern, text, re.IGNORECASE)
+        if writers_match:
+            writers = [w.strip() for w in writers_match.group(1).split(',') if w.strip()]
+        
+        # Ищем композиторов
+        composers_pattern = r'(?:Composer|Composers|Producer|Producers)[:\s]+([^\n]+)'
+        composers_match = re.search(composers_pattern, text, re.IGNORECASE)
+        if composers_match:
+            composers = [c.strip() for c in composers_match.group(1).split(',') if c.strip()]
+        
+        # Если не нашли по шаблонам, пробуем найти ISRC в тексте и взять данные рядом
+        if not writers and not composers:
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                if isrc in line:
+                    # Ищем строки с авторами в следующих 5 строках
+                    for j in range(i+1, min(i+6, len(lines))):
+                        if 'writer' in lines[j].lower() or 'composer' in lines[j].lower():
+                            clean_line = re.sub(r'(Writer|Composer|Author|Producer)[:\s]+', '', lines[j], flags=re.IGNORECASE)
+                            parts = [p.strip() for p in clean_line.split(',') if p.strip()]
+                            if 'writer' in lines[j].lower():
+                                writers.extend(parts)
+                            else:
+                                composers.extend(parts)
+        
+        return writers, composers
+        
+    except Exception as e:
+        logger.error(f"Ошибка поиска по ISRC {isrc}: {e}")
+        return [], []
+
+
 # ==================== APPLE MUSIC (АВТОРЫ И КОМПОЗИТОРЫ) ====================
 
 def get_track_credits_from_apple(track_name, artist_name):
     """Получение авторов и композиторов через Apple Music/iTunes API"""
     try:
-        # Ищем трек на Apple Music
         search_url = f"https://itunes.apple.com/search?term={quote_plus(track_name)} {quote_plus(artist_name)}&entity=song&limit=1"
         
         headers = {
@@ -247,20 +304,14 @@ def get_track_credits_from_apple(track_name, artist_name):
             writers = []
             composers = []
             
-            # Apple Music иногда отдаёт авторов в поле 'composerName'
             composer_name = track_data.get('composerName')
             if composer_name:
-                # Может быть несколько авторов через запятую или /
                 if ',' in composer_name:
                     composers = [c.strip() for c in composer_name.split(',')]
                 elif '/' in composer_name:
                     composers = [c.strip() for c in composer_name.split('/')]
                 else:
                     composers = [composer_name]
-            
-            # Пробуем найти авторов в других полях
-            # Иногда авторы в поле 'artistName' если это не исполнитель
-            # Но это редко
             
             return writers, composers
         
@@ -274,9 +325,8 @@ def get_track_credits_from_apple(track_name, artist_name):
 # ==================== DEEZER API (АВТОРЫ И КОМПОЗИТОРЫ) ====================
 
 def get_track_credits_from_deezer(track_name, artist_name):
-    """Получение авторов и композиторов через Deezer API (бесплатно, без токена)"""
+    """Получение авторов и композиторов через Deezer API"""
     try:
-        # Ищем трек на Deezer
         search_url = f"https://api.deezer.com/search?q={quote_plus(track_name)} {quote_plus(artist_name)}&limit=1"
         response = requests.get(search_url, timeout=10)
         response.raise_for_status()
@@ -285,7 +335,6 @@ def get_track_credits_from_deezer(track_name, artist_name):
         if data.get('data') and len(data['data']) > 0:
             track_id = data['data'][0].get('id')
             if track_id:
-                # Получаем данные трека
                 track_url = f"https://api.deezer.com/track/{track_id}"
                 track_resp = requests.get(track_url, timeout=10)
                 track_resp.raise_for_status()
@@ -294,7 +343,6 @@ def get_track_credits_from_deezer(track_name, artist_name):
                 writers = []
                 composers = []
                 
-                # Ищем авторов в contributors
                 if track_data.get('contributors'):
                     for contributor in track_data.get('contributors', []):
                         role = contributor.get('role', '').lower()
@@ -306,7 +354,6 @@ def get_track_credits_from_deezer(track_name, artist_name):
                             if name and name not in composers:
                                 composers.append(name)
                 
-                # Если нет contributors, пробуем другие поля
                 if not writers and track_data.get('writers'):
                     writers = track_data.get('writers', [])
                 if not composers and track_data.get('composers'):
@@ -451,7 +498,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    Отправьте ссылку на альбом или трек Spotify
    → Получите всю информацию + обложку 3000x3000 JPG
    → Бот определит наличие нецензурной лексики (🔞)
-   → Авторы и композиторы (Apple Music → Deezer → Apify)
+   → Авторы и композиторы (ISRC → Apple Music → Deezer → Apify)
 
 🎵 *Конвертация MP3 → WAV:*
    Отправьте MP3 файл
@@ -506,12 +553,10 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await status_msg.edit_text("❌ Не удалось получить данные трека")
                 return
             
-            # Исполнители трека
             track_artists = []
             for artist in track_data.get('artists', []):
                 track_artists.append(artist.get('name', 'Неизвестно'))
             
-            # Исполнители альбома (все)
             album_artists = []
             for artist in track_data.get('album', {}).get('artists', []):
                 artist_id = artist.get('id')
@@ -541,7 +586,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await status_msg.edit_text("❌ Не удалось получить данные альбома")
                 return
             
-            # Все исполнители альбома (для шапки)
             album_artists = []
             for artist in album_data.get('artists', []):
                 artist_id = artist.get('id')
@@ -558,7 +602,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         name = album_data.get('name', 'Неизвестно')
         
-        # Формируем исполнителей альбома (шапка)
         album_artist_text = ""
         artists_list = album_data.get('artists', [{'name': 'Неизвестно'}])
         for i, artist in enumerate(artists_list):
@@ -580,7 +623,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         explicit_album = any(track.get('explicit', False) for track in tracks)
         explicit_text = "🔞 Содержит нецензурную лексику" if explicit_album else "✅ Без нецензурной лексики"
         
-        # ========== ШАПКА ==========
         header = f"📀 *{name}*\n"
         header += f"👤 *Исполнитель:* {album_artist_text}\n"
         header += f"📅 *Дата выхода:* {release_date}\n"
@@ -590,7 +632,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         header += f"{explicit_text}\n\n"
         header += "*🎶 Треки:*\n"
         
-        # ========== ФОРМИРУЕМ СПИСОК ТРЕКОВ С ИСПОЛНИТЕЛЯМИ И АВТОРАМИ ==========
         all_tracks_text = ""
         for i, track in enumerate(tracks, 1):
             track_name = track.get('name', 'Без названия')
@@ -598,7 +639,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             isrc = track.get('external_ids', {}).get('isrc', 'Не найден')
             is_explicit = track.get('explicit', False)
             
-            # Исполнители этого трека
             track_artists = track.get('track_artists', [])
             if track_artists and len(track_artists) > 0:
                 if isinstance(track_artists[0], dict):
@@ -614,14 +654,23 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             first_artist = artists_str.split(',')[0].strip()
             
-            # 1. Пробуем Apple Music (часто есть авторы)
-            try:
-                time.sleep(0.3)
-                writers, composers = get_track_credits_from_apple(track_name, first_artist)
-            except Exception as e:
-                logger.warning(f"Не удалось получить авторов через Apple для {track_name}: {e}")
+            # 1. Пробуем через ISRC (самый надёжный)
+            if isrc and isrc != 'Не найден':
+                try:
+                    time.sleep(0.3)
+                    writers, composers = get_track_credits_from_isrc(isrc)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить авторов через ISRC для {track_name}: {e}")
             
-            # 2. Если Apple не дал — пробуем Deezer
+            # 2. Если ISRC не дал — пробуем Apple Music
+            if not writers and not composers:
+                try:
+                    time.sleep(0.3)
+                    writers, composers = get_track_credits_from_apple(track_name, first_artist)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить авторов через Apple для {track_name}: {e}")
+            
+            # 3. Если Apple не дал — пробуем Deezer
             if not writers and not composers:
                 try:
                     time.sleep(0.3)
@@ -629,7 +678,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except Exception as e:
                     logger.warning(f"Не удалось получить авторов через Deezer для {track_name}: {e}")
             
-            # 3. Если Deezer не дал — пробуем Apify
+            # 4. Если Deezer не дал — пробуем Apify
             if not writers and not composers:
                 track_id = track.get('id')
                 if track_id and APIFY_API_TOKEN:
@@ -648,6 +697,8 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if composers:
                     credit_parts.append(f"🎼 Композиция: {', '.join(composers)}")
                 credits_text = " | " + " | ".join(credit_parts)
+            else:
+                credits_text = " | ℹ️ Авторы не найдены"
             
             explicit_icon = "🔞 " if is_explicit else "✅ "
             
@@ -656,7 +707,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: Не найден{credits_text}\n"
         
-        # ========== ОТПРАВКА ==========
         full_text = header + all_tracks_text
         
         cover_url = None
@@ -665,7 +715,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await status_msg.delete()
         
-        # Обложка
         if cover_url:
             cover_buffer = get_cover_image(cover_url)
             if cover_buffer:
@@ -673,7 +722,6 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                     document=InputFile(cover_buffer, filename="cover.jpg")
                 )
         
-        # Текст
         if len(full_text) <= 4096:
             await update.message.reply_text(full_text, parse_mode="Markdown")
         else:
