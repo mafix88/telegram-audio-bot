@@ -83,7 +83,7 @@ def extract_album_id(url):
 
 
 def get_album_data(album_id):
-    """Получение данных об альбоме с ISRC, explicit, авторами и композиторами"""
+    """Получение данных об альбоме с ISRC, explicit"""
     token = get_spotify_token()
     if not token:
         return None, None
@@ -144,17 +144,11 @@ def get_album_data(album_id):
                                 'id': artist.get('id')
                             })
                         
-                        # ===== АВТОРЫ И КОМПОЗИТОРЫ =====
-                        track['writers'] = []
-                        track['composers'] = []
-                        
                     except Exception as e:
                         logger.warning(f"Не удалось получить данные для трека {track_id}: {e}")
                         track['external_ids'] = {}
                         track['explicit'] = False
                         track['track_artists'] = []
-                        track['writers'] = []
-                        track['composers'] = []
                 
                 tracks.append(track)
             
@@ -254,7 +248,7 @@ def get_track_credits_from_deezer(track_name, artist_name):
                 writers = []
                 composers = []
                 
-                # Ищем авторов (writers) в contributors
+                # Ищем авторов в contributors
                 if track_data.get('contributors'):
                     for contributor in track_data.get('contributors', []):
                         role = contributor.get('role', '').lower()
@@ -281,7 +275,7 @@ def get_track_credits_from_deezer(track_name, artist_name):
         return [], []
 
 
-# ==================== APIFY (АВТОРЫ И КОМПОЗИТОРЫ) ====================
+# ==================== APIFY (АВТОРЫ И КОМПОЗИТОРЫ - ЗАПАСНОЙ) ====================
 
 def get_track_credits_from_apify(track_id):
     """Получение авторов и композиторов через Apify Spotify Extended Scraper"""
@@ -291,10 +285,8 @@ def get_track_credits_from_apify(track_id):
     try:
         client = ApifyClient(APIFY_API_TOKEN)
         
-        # Формируем ссылку на трек
         track_url = f"https://open.spotify.com/track/{track_id}"
         
-        # Запускаем актор для одного трека
         run_input = {
             "tracks": [track_url],
         }
@@ -308,7 +300,6 @@ def get_track_credits_from_apify(track_id):
             writers = []
             composers = []
             
-            # Ищем credits в разных полях
             if track_data.get('credits'):
                 for credit in track_data.get('credits', []):
                     role = credit.get('role', '').lower()
@@ -321,17 +312,10 @@ def get_track_credits_from_apify(track_id):
                         if name and name not in composers:
                             composers.append(name)
             
-            # Если не нашли через credits, пробуем другие поля
             if not writers and track_data.get('writers'):
                 writers = track_data.get('writers', [])
             if not composers and track_data.get('composers'):
                 composers = track_data.get('composers', [])
-            
-            # Если всё ещё пусто — пробуем найти в 'artists' с ролью
-            if not writers and track_data.get('artists'):
-                for artist in track_data.get('artists', []):
-                    if artist.get('role') and 'writer' in artist.get('role', '').lower():
-                        writers.append(artist.get('name', ''))
             
             return writers, composers
         
@@ -582,21 +566,23 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             writers = []
             composers = []
             
-            track_id = track.get('id')
-            if track_id and APIFY_API_TOKEN:
-                try:
-                    time.sleep(0.5)
-                    writers, composers = get_track_credits_from_apify(track_id)
-                except Exception as e:
-                    logger.warning(f"Не удалось получить авторов через Apify для {track_name}: {e}")
+            # 1. Пробуем Deezer (основной источник)
+            try:
+                time.sleep(0.3)
+                first_artist = artists_str.split(',')[0].strip()
+                writers, composers = get_track_credits_from_deezer(track_name, first_artist)
+            except Exception as e:
+                logger.warning(f"Не удалось получить авторов через Deezer для {track_name}: {e}")
             
-            # Если Apify не дал результат — пробуем Deezer
+            # 2. Если Deezer не дал результат — пробуем Apify
             if not writers and not composers:
-                try:
-                    time.sleep(0.3)
-                    writers, composers = get_track_credits_from_deezer(track_name, artists_str.split(',')[0].strip())
-                except Exception as e:
-                    logger.warning(f"Не удалось получить авторов через Deezer для {track_name}: {e}")
+                track_id = track.get('id')
+                if track_id and APIFY_API_TOKEN:
+                    try:
+                        time.sleep(0.5)
+                        writers, composers = get_track_credits_from_apify(track_id)
+                    except Exception as e:
+                        logger.warning(f"Не удалось получить авторов через Apify для {track_name}: {e}")
             
             # Формируем строку с авторами
             credits_text = ""
