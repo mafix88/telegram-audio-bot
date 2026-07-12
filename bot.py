@@ -144,7 +144,7 @@ def get_album_data(album_id):
                                 'id': artist.get('id')
                             })
                         
-                        # ===== АВТОРЫ И КОМПОЗИТОРЫ =====
+                        # ===== АВТОРЫ И КОМПОЗИТОРЫ (будет заполнено позже через Deezer) =====
                         track['writers'] = []
                         track['composers'] = []
                         
@@ -231,6 +231,75 @@ def ms_to_min_sec(ms):
     return f"{minutes}:{seconds:02d}"
 
 
+# ==================== DEEZER API (АВТОРЫ И КОМПОЗИТОРЫ) ====================
+
+def get_track_credits_from_deezer(track_name, artist_name):
+    """Получение авторов и композиторов через Deezer API (бесплатно, без токена)"""
+    try:
+        # Ищем трек на Deezer
+        search_url = f"https://api.deezer.com/search?q={quote_plus(track_name)} {quote_plus(artist_name)}&limit=1"
+        response = requests.get(search_url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('data') and len(data['data']) > 0:
+            track_id = data['data'][0].get('id')
+            if track_id:
+                # Получаем данные трека
+                track_url = f"https://api.deezer.com/track/{track_id}"
+                track_resp = requests.get(track_url, timeout=10)
+                track_resp.raise_for_status()
+                track_data = track_resp.json()
+                
+                writers = []
+                composers = []
+                
+                # Ищем авторов (writers) в contributors
+                if track_data.get('contributors'):
+                    for contributor in track_data.get('contributors', []):
+                        role = contributor.get('role', '').lower()
+                        name = contributor.get('name', '')
+                        if 'writer' in role or 'songwriter' in role or 'author' in role:
+                            writers.append(name)
+                        elif 'composer' in role or 'producer' in role:
+                            composers.append(name)
+                
+                # Если нет contributors, пробуем другие поля
+                if not writers and track_data.get('writers'):
+                    writers = track_data.get('writers', [])
+                if not composers and track_data.get('composers'):
+                    composers = track_data.get('composers', [])
+                
+                # Если всё ещё пусто — пробуем получить через другой эндпоинт
+                if not writers and not composers:
+                    # Пробуем найти через альбом
+                    album_id = track_data.get('album', {}).get('id')
+                    if album_id:
+                        album_url = f"https://api.deezer.com/album/{album_id}/tracks"
+                        album_resp = requests.get(album_url, timeout=10)
+                        album_resp.raise_for_status()
+                        album_data = album_resp.json()
+                        for t in album_data.get('data', []):
+                            if t.get('title') == track_name:
+                                if t.get('contributors'):
+                                    for contributor in t.get('contributors', []):
+                                        role = contributor.get('role', '').lower()
+                                        name = contributor.get('name', '')
+                                        if 'writer' in role or 'songwriter' in role or 'author' in role:
+                                            writers.append(name)
+                                        elif 'composer' in role or 'producer' in role:
+                                            composers.append(name)
+                                break
+                
+                return writers, composers
+        
+        return [], []
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения данных с Deezer для {track_name}: {e}")
+        return [], []
+
+
 # ==================== APIFY (ЖАНРЫ) ====================
 
 def get_album_genre_via_apify(album_url):
@@ -310,6 +379,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    Отправьте ссылку на альбом или трек Spotify
    → Получите всю информацию + обложку 3000x3000 JPG
    → Бот определит наличие нецензурной лексики (🔞)
+   → Авторы и композиторы (через Deezer API)
 
 🎵 *Конвертация MP3 → WAV:*
    Отправьте MP3 файл
@@ -448,7 +518,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         header += f"{explicit_text}\n\n"
         header += "*🎶 Треки:*\n"
         
-        # ========== ФОРМИРУЕМ СПИСОК ТРЕКОВ С ИСПОЛНИТЕЛЯМИ ==========
+        # ========== ФОРМИРУЕМ СПИСОК ТРЕКОВ С ИСПОЛНИТЕЛЯМИ И АВТОРАМИ ==========
         all_tracks_text = ""
         for i, track in enumerate(tracks, 1):
             track_name = track.get('name', 'Без названия')
@@ -466,12 +536,34 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 artists_str = ", ".join([a.get('name', 'Неизвестно') for a in album_data.get('artists', [{'name': 'Неизвестно'}])])
             
+            # ===== ПОЛУЧАЕМ АВТОРОВ И КОМПОЗИТОРОВ ЧЕРЕЗ DEEZER =====
+            writers = []
+            composers = []
+            
+            # Пробуем получить через Deezer
+            try:
+                # Задержка перед запросом к Deezer
+                time.sleep(0.5)
+                writers, composers = get_track_credits_from_deezer(track_name, artists_str.split(',')[0].strip())
+            except Exception as e:
+                logger.warning(f"Не удалось получить авторов для {track_name}: {e}")
+            
+            # Формируем строку с авторами
+            credits_text = ""
+            if writers or composers:
+                credit_parts = []
+                if writers:
+                    credit_parts.append(f"✍️ Текст: {', '.join(writers)}")
+                if composers:
+                    credit_parts.append(f"🎼 Композиция: {', '.join(composers)}")
+                credits_text = " | " + " | ".join(credit_parts)
+            
             explicit_icon = "🔞 " if is_explicit else "✅ "
             
             if isrc != 'Не найден':
-                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: `{isrc}`\n"
+                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: `{isrc}`{credits_text}\n"
             else:
-                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: Не найден\n"
+                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: Не найден{credits_text}\n"
         
         # ========== ОТПРАВКА ==========
         full_text = header + all_tracks_text
