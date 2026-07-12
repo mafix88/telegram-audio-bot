@@ -144,7 +144,7 @@ def get_album_data(album_id):
                                 'id': artist.get('id')
                             })
                         
-                        # ===== АВТОРЫ И КОМПОЗИТОРЫ (будет заполнено позже через Deezer) =====
+                        # ===== АВТОРЫ И КОМПОЗИТОРЫ =====
                         track['writers'] = []
                         track['composers'] = []
                         
@@ -229,6 +229,56 @@ def ms_to_min_sec(ms):
     minutes = total_sec // 60
     seconds = total_sec % 60
     return f"{minutes}:{seconds:02d}"
+
+
+# ==================== DEEZER API (АВТОРЫ И КОМПОЗИТОРЫ) ====================
+
+def get_track_credits_from_deezer(track_name, artist_name):
+    """Получение авторов и композиторов через Deezer API (бесплатно, без токена)"""
+    try:
+        # Ищем трек на Deezer
+        search_url = f"https://api.deezer.com/search?q={quote_plus(track_name)} {quote_plus(artist_name)}&limit=1"
+        response = requests.get(search_url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('data') and len(data['data']) > 0:
+            track_id = data['data'][0].get('id')
+            if track_id:
+                # Получаем данные трека
+                track_url = f"https://api.deezer.com/track/{track_id}"
+                track_resp = requests.get(track_url, timeout=10)
+                track_resp.raise_for_status()
+                track_data = track_resp.json()
+                
+                writers = []
+                composers = []
+                
+                # Ищем авторов (writers) в contributors
+                if track_data.get('contributors'):
+                    for contributor in track_data.get('contributors', []):
+                        role = contributor.get('role', '').lower()
+                        name = contributor.get('name', '')
+                        if 'writer' in role or 'songwriter' in role or 'author' in role or 'lyricist' in role:
+                            if name and name not in writers:
+                                writers.append(name)
+                        elif 'composer' in role or 'producer' in role:
+                            if name and name not in composers:
+                                composers.append(name)
+                
+                # Если нет contributors, пробуем другие поля
+                if not writers and track_data.get('writers'):
+                    writers = track_data.get('writers', [])
+                if not composers and track_data.get('composers'):
+                    composers = track_data.get('composers', [])
+                
+                return writers, composers
+        
+        return [], []
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения данных с Deezer для {track_name}: {e}")
+        return [], []
 
 
 # ==================== APIFY (АВТОРЫ И КОМПОЗИТОРЫ) ====================
@@ -371,7 +421,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    Отправьте ссылку на альбом или трек Spotify
    → Получите всю информацию + обложку 3000x3000 JPG
    → Бот определит наличие нецензурной лексики (🔞)
-   → Авторы и композиторы (через Deezer API)
+   → Авторы и композиторы (через Deezer + Apify)
 
 🎵 *Конвертация MP3 → WAV:*
    Отправьте MP3 файл
@@ -528,21 +578,19 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 artists_str = ", ".join([a.get('name', 'Неизвестно') for a in album_data.get('artists', [{'name': 'Неизвестно'}])])
             
-            # ===== ПОЛУЧАЕМ АВТОРОВ И КОМПОЗИТОРОВ ЧЕРЕЗ APIFY =====
+            # ===== ПОЛУЧАЕМ АВТОРОВ И КОМПОЗИТОРОВ =====
             writers = []
             composers = []
             
-            # Пробуем получить через Apify
             track_id = track.get('id')
             if track_id and APIFY_API_TOKEN:
                 try:
-                    # Задержка перед запросом к Apify
                     time.sleep(0.5)
                     writers, composers = get_track_credits_from_apify(track_id)
                 except Exception as e:
-                    logger.warning(f"Не удалось получить авторов для {track_name}: {e}")
+                    logger.warning(f"Не удалось получить авторов через Apify для {track_name}: {e}")
             
-            # Если Apify не дал результат — пробуем Deezer как запасной вариант
+            # Если Apify не дал результат — пробуем Deezer
             if not writers and not composers:
                 try:
                     time.sleep(0.3)
