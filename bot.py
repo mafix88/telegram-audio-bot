@@ -227,7 +227,7 @@ def ms_to_min_sec(ms):
     return f"{minutes}:{seconds:02d}"
 
 
-# ==================== APPLE MUSIC (АВТОРЫ) ====================
+# ==================== APPLE MUSIC API (АВТОРЫ) ====================
 
 def get_track_credits_from_apple(track_name, artist_name):
     """Получение авторов через Apple Music API"""
@@ -263,77 +263,6 @@ def get_track_credits_from_apple(track_name, artist_name):
         
     except Exception as e:
         logger.error(f"Ошибка Apple Music для {track_name}: {e}")
-        return [], []
-
-
-# ==================== APPLE MUSIC PAGE (ПАРСИНГ СТРАНИЦЫ) ====================
-
-def get_track_credits_from_apple_page(track_name, artist_name):
-    """Парсинг страницы Apple Music для получения авторов"""
-    try:
-        search_url = f"https://itunes.apple.com/search?term={quote_plus(track_name)} {quote_plus(artist_name)}&entity=song&limit=1"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(search_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('results') and len(data['results']) > 0:
-            track_id = data['results'][0].get('trackId')
-            if track_id:
-                page_url = f"https://music.apple.com/track/{track_id}"
-                page_response = requests.get(page_url, headers=headers, timeout=10)
-                page_response.raise_for_status()
-                
-                soup = BeautifulSoup(page_response.text, 'html.parser')
-                text = soup.get_text()
-                
-                writers = []
-                composers = []
-                
-                if 'Written by' in text:
-                    written_section = re.search(r'Written by(.*?)(?=Produced by|$)', text, re.DOTALL)
-                    if written_section:
-                        names = re.findall(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', written_section.group(1))
-                        writers = [name.strip() for name in names if name.strip()]
-                
-                if not writers and 'Composed by' in text:
-                    composed_section = re.search(r'Composed by(.*?)(?=Produced by|$)', text, re.DOTALL)
-                    if composed_section:
-                        names = re.findall(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', composed_section.group(1))
-                        composers = [name.strip() for name in names if name.strip()]
-                
-                scripts = soup.find_all('script', type='application/ld+json')
-                for script in scripts:
-                    try:
-                        if script.string:
-                            data_json = json.loads(script.string)
-                            def find_composers(obj):
-                                if isinstance(obj, dict):
-                                    if 'composer' in obj:
-                                        composer = obj['composer']
-                                        if isinstance(composer, dict) and 'name' in composer:
-                                            composers.append(composer['name'])
-                                        elif isinstance(composer, str):
-                                            composers.append(composer)
-                                    for key, value in obj.items():
-                                        find_composers(value)
-                                elif isinstance(obj, list):
-                                    for item in obj:
-                                        find_composers(item)
-                            find_composers(data_json)
-                    except:
-                        continue
-                
-                return writers, composers
-        
-        return [], []
-        
-    except Exception as e:
-        logger.error(f"Ошибка парсинга Apple Music для {track_name}: {e}")
         return [], []
 
 
@@ -810,22 +739,14 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             first_artist = artists_str.split(',')[0].strip()
             track_id = track.get('id')
             
-            # 1. Apple Music
+            # 1. Apple Music API
             try:
                 time.sleep(0.3)
                 writers, composers = get_track_credits_from_apple(track_name, first_artist)
             except Exception as e:
                 logger.warning(f"Apple Music API: {e}")
             
-            # 2. Если нет — Apple Music Page
-            if not writers and not composers:
-                try:
-                    time.sleep(0.3)
-                    writers, composers = get_track_credits_from_apple_page(track_name, first_artist)
-                except Exception as e:
-                    logger.warning(f"Apple Music Page: {e}")
-            
-            # 3. Если нет — Spotify Page
+            # 2. Если нет — Spotify Page
             if not writers and not composers and track_id:
                 try:
                     time.sleep(0.5)
@@ -833,7 +754,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except Exception as e:
                     logger.warning(f"Spotify Page: {e}")
             
-            # 4. Если нет — MusicBrainz
+            # 3. Если нет — MusicBrainz
             if not writers and not composers:
                 try:
                     time.sleep(0.3)
@@ -841,7 +762,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except Exception as e:
                     logger.warning(f"MusicBrainz: {e}")
             
-            # 5. Если нет — Deezer
+            # 4. Если нет — Deezer
             if not writers and not composers:
                 try:
                     time.sleep(0.3)
@@ -849,7 +770,7 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except Exception as e:
                     logger.warning(f"Deezer: {e}")
             
-            # 6. Если нет — Apify
+            # 5. Если нет — Apify
             if not writers and not composers and track_id and APIFY_API_TOKEN:
                 try:
                     time.sleep(0.5)
