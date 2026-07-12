@@ -93,7 +93,6 @@ def get_album_data(album_id):
     headers = {"Authorization": f"Bearer {token}"}
     
     try:
-        # Данные альбома
         album_resp = requests.get(
             f"https://api.spotify.com/v1/albums/{album_id}",
             headers=headers,
@@ -102,7 +101,6 @@ def get_album_data(album_id):
         album_resp.raise_for_status()
         album_data = album_resp.json()
         
-        # Получаем все треки альбома
         tracks = []
         offset = 0
         limit = 50
@@ -120,7 +118,6 @@ def get_album_data(album_id):
                 track_id = track.get("id")
                 if track_id:
                     try:
-                        # Задержка между запросами
                         time.sleep(0.5)
                         track_detail_resp = requests.get(
                             f"https://api.spotify.com/v1/tracks/{track_id}",
@@ -130,15 +127,11 @@ def get_album_data(album_id):
                         track_detail_resp.raise_for_status()
                         track_detail = track_detail_resp.json()
                         
-                        # ISRC
                         isrc = track_detail.get('external_ids', {}).get('isrc')
                         track['external_ids'] = {'isrc': isrc} if isrc else {}
-                        
-                        # Explicit
                         track['explicit'] = track_detail.get('explicit', False)
                         track['duration_ms'] = track_detail.get('duration_ms', track.get('duration_ms'))
                         
-                        # ===== ИСПОЛНИТЕЛИ ТРЕКА =====
                         track['track_artists'] = []
                         for artist in track_detail.get('artists', []):
                             track['track_artists'].append({
@@ -182,7 +175,6 @@ def get_track_data(track_id):
         track_resp.raise_for_status()
         track_data = track_resp.json()
         
-        # Добавляем explicit флаг, если его нет
         if 'explicit' not in track_data:
             track_data['explicit'] = track_data.get('explicit', False)
         
@@ -227,280 +219,32 @@ def ms_to_min_sec(ms):
     return f"{minutes}:{seconds:02d}"
 
 
-# ==================== APPLE MUSIC API (АВТОРЫ) ====================
+# ==================== APPLE MUSIC (ССЫЛКИ) ====================
 
-def get_track_credits_from_apple(track_name, artist_name):
-    """Получение авторов через Apple Music API"""
+def get_apple_music_artist_url(artist_name):
+    """Получение ссылки на Apple Music через поиск"""
     try:
-        search_url = f"https://itunes.apple.com/search?term={quote_plus(track_name)} {quote_plus(artist_name)}&entity=song&limit=1"
+        encoded_name = quote_plus(artist_name)
+        url = f"https://itunes.apple.com/search?term={encoded_name}&entity=musicArtist&limit=1"
         
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
-        response = requests.get(search_url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         
         if data.get('results') and len(data['results']) > 0:
-            track_data = data['results'][0]
-            
-            writers = []
-            composers = []
-            
-            composer_name = track_data.get('composerName')
-            if composer_name:
-                if ',' in composer_name:
-                    composers = [c.strip() for c in composer_name.split(',')]
-                elif '/' in composer_name:
-                    composers = [c.strip() for c in composer_name.split('/')]
-                else:
-                    composers = [composer_name]
-            
-            return writers, composers
+            artist_id = data['results'][0].get('artistId')
+            if artist_id:
+                return f"https://music.apple.com/artist/{artist_id}"
         
-        return [], []
+        return None
         
     except Exception as e:
-        logger.error(f"Ошибка Apple Music для {track_name}: {e}")
-        return [], []
-
-
-# ==================== SPOTIFY CREDITS (ПАРСИНГ СТРАНИЦЫ) ====================
-
-def get_track_credits_from_spotify_page(track_id):
-    """Парсинг страницы Spotify для получения авторов"""
-    try:
-        url = f"https://open.spotify.com/track/{track_id}"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Referer': 'https://open.spotify.com/',
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Ищем в JSON-LD
-        scripts = soup.find_all('script', type='application/ld+json')
-        for script in scripts:
-            try:
-                if script.string:
-                    data = json.loads(script.string)
-                    
-                    def find_credits(obj):
-                        if isinstance(obj, dict):
-                            if 'credits' in obj:
-                                return obj['credits']
-                            for key, value in obj.items():
-                                result = find_credits(value)
-                                if result:
-                                    return result
-                        elif isinstance(obj, list):
-                            for item in obj:
-                                result = find_credits(item)
-                                if result:
-                                    return result
-                        return None
-                    
-                    credits = find_credits(data)
-                    if credits:
-                        writers = []
-                        composers = []
-                        for credit in credits:
-                            role = credit.get('role', '').lower()
-                            name = credit.get('name', '')
-                            if 'writer' in role or 'songwriter' in role or 'author' in role or 'lyricist' in role:
-                                if name and name not in writers:
-                                    writers.append(name)
-                            elif 'composer' in role or 'producer' in role:
-                                if name and name not in composers:
-                                    composers.append(name)
-                        if writers or composers:
-                            return writers, composers
-            except Exception as e:
-                continue
-        
-        # Ищем в тексте страницы
-        text = soup.get_text()
-        
-        writers = []
-        composers = []
-        
-        credits_section = re.search(r'Композиция и текст(.*?)(?=Продакшен|Сведения|$)', text, re.DOTALL)
-        if credits_section:
-            lines = credits_section.group(1).strip().split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('Композиция'):
-                    if 'Композитор' in line or 'Автор' in line:
-                        name = re.sub(r'(Композитор|Автор|Автор Текстов|•)', '', line).strip()
-                        if name:
-                            composers.append(name)
-                    else:
-                        if line and len(line) > 1:
-                            writers.append(line)
-        
-        if not writers and not composers:
-            credits_section_en = re.search(r'Credits(.*?)(?=Producers|$)', text, re.DOTALL)
-            if credits_section_en:
-                lines = credits_section_en.group(1).strip().split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line and not line.startswith('Credits'):
-                        if 'Writer' in line or 'Songwriter' in line:
-                            name = re.sub(r'(Writer|Songwriter|•)', '', line).strip()
-                            if name:
-                                writers.append(name)
-                        elif 'Composer' in line:
-                            name = re.sub(r'(Composer|•)', '', line).strip()
-                            if name:
-                                composers.append(name)
-        
-        return writers, composers
-        
-    except Exception as e:
-        logger.error(f"Ошибка парсинга страницы Spotify для трека {track_id}: {e}")
-        return [], []
-
-
-# ==================== MUSICBRAINZ ====================
-
-def get_track_credits_from_musicbrainz(track_name, artist_name):
-    """Получение авторов через MusicBrainz"""
-    try:
-        url = f"https://musicbrainz.org/ws/2/recording?query={quote_plus(track_name)} AND artist:{quote_plus(artist_name)}&fmt=json"
-        
-        headers = {
-            'User-Agent': 'MusicBot/1.0 (https://t.me/musicbot)'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('recordings') and len(data['recordings']) > 0:
-            recording = data['recordings'][0]
-            
-            writers = []
-            composers = []
-            
-            if recording.get('relations'):
-                for relation in recording.get('relations', []):
-                    if relation.get('type') == 'writer':
-                        if relation.get('artist', {}).get('name'):
-                            writers.append(relation['artist']['name'])
-                    elif relation.get('type') == 'composer':
-                        if relation.get('artist', {}).get('name'):
-                            composers.append(relation['artist']['name'])
-            return writers, composers
-        
-        return [], []
-        
-    except Exception as e:
-        logger.error(f"Ошибка MusicBrainz для {track_name}: {e}")
-        return [], []
-
-
-# ==================== DEEZER ====================
-
-def get_track_credits_from_deezer(track_name, artist_name):
-    """Получение авторов через Deezer API"""
-    try:
-        search_url = f"https://api.deezer.com/search?q={quote_plus(track_name)} {quote_plus(artist_name)}&limit=1"
-        response = requests.get(search_url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('data') and len(data['data']) > 0:
-            track_id = data['data'][0].get('id')
-            if track_id:
-                track_url = f"https://api.deezer.com/track/{track_id}"
-                track_resp = requests.get(track_url, timeout=10)
-                track_resp.raise_for_status()
-                track_data = track_resp.json()
-                
-                writers = []
-                composers = []
-                
-                if track_data.get('contributors'):
-                    for contributor in track_data.get('contributors', []):
-                        role = contributor.get('role', '').lower()
-                        name = contributor.get('name', '')
-                        if 'writer' in role or 'songwriter' in role or 'author' in role or 'lyricist' in role:
-                            if name and name not in writers:
-                                writers.append(name)
-                        elif 'composer' in role or 'producer' in role:
-                            if name and name not in composers:
-                                composers.append(name)
-                
-                if not writers and track_data.get('writers'):
-                    writers = track_data.get('writers', [])
-                if not composers and track_data.get('composers'):
-                    composers = track_data.get('composers', [])
-                
-                return writers, composers
-        
-        return [], []
-        
-    except Exception as e:
-        logger.error(f"Ошибка Deezer для {track_name}: {e}")
-        return [], []
-
-
-# ==================== APIFY ====================
-
-def get_track_credits_from_apify(track_id):
-    """Получение авторов через Apify"""
-    if not APIFY_API_TOKEN:
-        return [], []
-    
-    try:
-        client = ApifyClient(APIFY_API_TOKEN)
-        
-        track_url = f"https://open.spotify.com/track/{track_id}"
-        
-        run_input = {
-            "tracks": [track_url],
-        }
-        
-        run = client.actor("musicae/spotify-extended-scraper").call(run_input=run_input)
-        dataset_items = client.dataset(run["defaultDatasetId"]).list_items().items
-        
-        if dataset_items and len(dataset_items) > 0:
-            track_data = dataset_items[0]
-            
-            writers = []
-            composers = []
-            
-            if track_data.get('credits'):
-                for credit in track_data.get('credits', []):
-                    role = credit.get('role', '').lower()
-                    name = credit.get('name', '')
-                    
-                    if 'writer' in role or 'songwriter' in role or 'author' in role or 'lyricist' in role:
-                        if name and name not in writers:
-                            writers.append(name)
-                    elif 'composer' in role or 'producer' in role:
-                        if name and name not in composers:
-                            composers.append(name)
-            
-            if not writers and track_data.get('writers'):
-                writers = track_data.get('writers', [])
-            if not composers and track_data.get('composers'):
-                composers = track_data.get('composers', [])
-            
-            return writers, composers
-        
-        return [], []
-        
-    except Exception as e:
-        logger.error(f"Ошибка Apify: {e}")
-        return [], []
+        logger.error(f"Ошибка получения Apple Music ссылки для {artist_name}: {e}")
+        return None
 
 
 # ==================== APIFY (ЖАНРЫ) ====================
@@ -542,34 +286,6 @@ def get_album_genre_via_apify(album_url):
         return None
 
 
-# ==================== APPLE MUSIC (ССЫЛКИ) ====================
-
-def get_apple_music_artist_url(artist_name):
-    """Получение ссылки на Apple Music через поиск"""
-    try:
-        encoded_name = quote_plus(artist_name)
-        url = f"https://itunes.apple.com/search?term={encoded_name}&entity=musicArtist&limit=1"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('results') and len(data['results']) > 0:
-            artist_id = data['results'][0].get('artistId')
-            if artist_id:
-                return f"https://music.apple.com/artist/{artist_id}"
-        
-        return None
-        
-    except Exception as e:
-        logger.error(f"Ошибка получения Apple Music ссылки для {artist_name}: {e}")
-        return None
-
-
 # ==================== КОМАНДЫ БОТА ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -582,7 +298,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    Отправьте ссылку на альбом или трек Spotify
    → Получите всю информацию + обложку 3000x3000 JPG
    → Бот определит наличие нецензурной лексики (🔞)
-   → Авторы и композиторы (Apple Music → Spotify Page → MusicBrainz → Deezer → Apify)
+   → Ссылки на Spotify и Apple Music для каждого исполнителя
 
 🎵 *Конвертация MP3 → WAV:*
    Отправьте MP3 файл
@@ -644,10 +360,21 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             album_artists = []
             for artist in track_data.get('album', {}).get('artists', []):
                 artist_id = artist.get('id')
+                artist_name = artist.get('name', 'Неизвестно')
+                spotify_url = f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
+                
+                apple_url = None
+                try:
+                    time.sleep(0.3)
+                    apple_url = get_apple_music_artist_url(artist_name)
+                except Exception as e:
+                    logger.warning(f"Apple Music ссылка для {artist_name}: {e}")
+                
                 album_artists.append({
-                    'name': artist.get('name', 'Неизвестно'),
+                    'name': artist_name,
                     'id': artist_id,
-                    'spotify_url': f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
+                    'spotify_url': spotify_url,
+                    'apple_url': apple_url
                 })
             
             track_data['explicit'] = track_data.get('explicit', False)
@@ -673,10 +400,21 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             album_artists = []
             for artist in album_data.get('artists', []):
                 artist_id = artist.get('id')
+                artist_name = artist.get('name', 'Неизвестно')
+                spotify_url = f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
+                
+                apple_url = None
+                try:
+                    time.sleep(0.3)
+                    apple_url = get_apple_music_artist_url(artist_name)
+                except Exception as e:
+                    logger.warning(f"Apple Music ссылка для {artist_name}: {e}")
+                
                 album_artists.append({
-                    'name': artist.get('name', 'Неизвестно'),
+                    'name': artist_name,
                     'id': artist_id,
-                    'spotify_url': f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
+                    'spotify_url': spotify_url,
+                    'apple_url': apple_url
                 })
             album_data['artists'] = album_artists
         
@@ -691,9 +429,16 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         for i, artist in enumerate(artists_list):
             artist_name = artist.get('name', 'Неизвестно')
             spotify_url = artist.get('spotify_url')
+            apple_url = artist.get('apple_url')
             
+            links = []
             if spotify_url:
-                album_artist_text += f"[{artist_name}]({spotify_url})"
+                links.append(f"[Spotify]({spotify_url})")
+            if apple_url:
+                links.append(f"[Apple]({apple_url})")
+            
+            if links:
+                album_artist_text += f"{artist_name} ({', '.join(links)})"
             else:
                 album_artist_text += artist_name
             
@@ -732,74 +477,12 @@ async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 artists_str = ", ".join([a.get('name', 'Неизвестно') for a in album_data.get('artists', [{'name': 'Неизвестно'}])])
             
-            # ===== ПОЛУЧАЕМ АВТОРОВ И КОМПОЗИТОРОВ =====
-            writers = []
-            composers = []
-            
-            first_artist = artists_str.split(',')[0].strip()
-            track_id = track.get('id')
-            
-            # 1. Apple Music API
-            try:
-                time.sleep(0.3)
-                writers, composers = get_track_credits_from_apple(track_name, first_artist)
-            except Exception as e:
-                logger.warning(f"Apple Music API: {e}")
-            
-            # 2. Если нет — Spotify Page
-            if not writers and not composers and track_id:
-                try:
-                    time.sleep(0.5)
-                    writers, composers = get_track_credits_from_spotify_page(track_id)
-                except Exception as e:
-                    logger.warning(f"Spotify Page: {e}")
-            
-            # 3. Если нет — MusicBrainz
-            if not writers and not composers:
-                try:
-                    time.sleep(0.3)
-                    writers, composers = get_track_credits_from_musicbrainz(track_name, first_artist)
-                except Exception as e:
-                    logger.warning(f"MusicBrainz: {e}")
-            
-            # 4. Если нет — Deezer
-            if not writers and not composers:
-                try:
-                    time.sleep(0.3)
-                    writers, composers = get_track_credits_from_deezer(track_name, first_artist)
-                except Exception as e:
-                    logger.warning(f"Deezer: {e}")
-            
-            # 5. Если нет — Apify
-            if not writers and not composers and track_id and APIFY_API_TOKEN:
-                try:
-                    time.sleep(0.5)
-                    writers, composers = get_track_credits_from_apify(track_id)
-                except Exception as e:
-                    logger.warning(f"Apify: {e}")
-            
-            # Формируем строку с авторами
-            credits_text = ""
-            if writers or composers:
-                credit_parts = []
-                if writers:
-                    credit_parts.append(f"✍️ Текст: {', '.join(writers)}")
-                if composers:
-                    credit_parts.append(f"🎼 Композиция: {', '.join(composers)}")
-                credits_text = " | " + " | ".join(credit_parts)
-            else:
-                track_url = f"https://open.spotify.com/track/{track_id}" if track_id else ""
-                if track_url:
-                    credits_text = f" | ℹ️ [Авторы не найдены]({track_url}) — откройте 'Сведения' в Spotify"
-                else:
-                    credits_text = " | ℹ️ Авторы не найдены"
-            
             explicit_icon = "🔞 " if is_explicit else "✅ "
             
             if isrc != 'Не найден':
-                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: `{isrc}`{credits_text}\n"
+                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: `{isrc}`\n"
             else:
-                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: Не найден{credits_text}\n"
+                all_tracks_text += f"{i}. {explicit_icon}`{track_name}` — *{artists_str}* ({duration}) ISRC: Не найден\n"
         
         full_text = header + all_tracks_text
         
@@ -886,10 +569,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== ЗАПУСК ====================
 
 def main():
-    # Увеличиваем таймауты для подключения к Telegram
     app = Application.builder().token(BOT_TOKEN).connect_timeout(60.0).read_timeout(60.0).build()
     
-    # Принудительно удаляем вебхук (решает 409 Conflict)
     try:
         app.bot.delete_webhook(drop_pending_updates=True)
         print("✅ Webhook удалён")
