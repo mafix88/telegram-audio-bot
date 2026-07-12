@@ -886,7 +886,15 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== ЗАПУСК ====================
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Увеличиваем таймауты для подключения к Telegram
+    app = Application.builder().token(BOT_TOKEN).connect_timeout(60.0).read_timeout(60.0).build()
+    
+    # Принудительно удаляем вебхук (решает 409 Conflict)
+    try:
+        app.bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook удалён")
+    except Exception as e:
+        print(f"⚠️ Не удалось удалить webhook: {e}")
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
@@ -899,7 +907,7 @@ def main():
     print(f"   BOT_TOKEN: {'✅' if BOT_TOKEN else '❌'}")
     print(f"   SPOTIFY_API: {'✅' if SPOTIFY_CLIENT_ID else '❌'}")
     print(f"   APIFY_API: {'✅' if APIFY_API_TOKEN else '❌'}")
-    app.run_polling()
+    app.run_polling(timeout=60)
 
 
 if __name__ == "__main__":
